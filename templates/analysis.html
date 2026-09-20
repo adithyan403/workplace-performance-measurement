@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Analysis{% endblock %}
+{% block heading %}Motion &amp; Zone Analysis{% endblock %}
+
+{% block content %}
+<div class="kpi">
+  <div class="box card-wpm" style="--glow:rgba(34,211,238,.2)">
+    <div class="num" id="kSecs">0</div><div class="lbl">Seconds Shown</div>
+    <div class="mini">per-second motion energy</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(245,158,11,.18)">
+    <div class="num" id="kPeak">0</div><div class="lbl">Peak Motion</div>
+    <div class="mini">max global frame-diff (px)</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(168,85,247,.18)">
+    <div class="num" id="kZone">cell {{ zones.primary }}</div>
+    <div class="lbl">Primary Zone</div>
+    <div class="mini">auto-discovered writing area</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(34,197,94,.18)">
+    <div class="num">{{ metrics | length | format_ns }}</div><div class="lbl">Metric Rows</div>
+    <div class="mini">global · zone · histogram</div>
+  </div>
+</div>
+
+<div class="grid2">
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-activity"></i> Global Motion Energy (frame diff)</div>
+    <div style="height:280px"><canvas id="motionLine"></canvas></div>
+  </div>
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-bounding-box"></i> Workspace Zone Heatmap (3×4)</div>
+    <div class="scroll-x">
+      <table style="border-collapse:separate;border-spacing:8px;margin:auto">
+        {% for row in heatmap %}
+        <tr>
+          {% for v in row %}
+          <td style="min-width:74px;height:74px;text-align:center;border-radius:12px;font-weight:700;
+                     background: {{ v | zone_color }};color:#0b1220">{{ v }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </table>
+      <div class="text-muted text-center mt-2" style="font-size:.75rem">
+        Mean motion energy per grid cell · primary zone highlighted in config
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="grid2">
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-grid-3x3-gap"></i> Writing Zone Motion (primary &amp; secondary)</div>
+    <div style="height:250px"><canvas id="zoneLine"></canvas></div>
+  </div>
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-window-stack"></i> Histogram Change (frame appearance)</div>
+    <div style="height:250px"><canvas id="histLine"></canvas></div>
+  </div>
+</div>
+
+<div class="card-wpm">
+  <div class="card-title"><i class="bi bi-palette"></i> Activity Legend</div>
+  <div class="d-flex flex-wrap gap-3">
+    {% for a in activities %}
+    <span class="badge-act" style="background:{{ a.color }}22;color:{{ a.color }};border:1px solid {{ a.color }}55">
+      <span class="dot" style="background:{{ a.color }}"></span>{{ a.id }}
+    </span>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+{% set m = metrics %}
+const ACT_COLORS = {{ colors | tojson }};
+const DATA = {
+  sec: {{ m | map(attribute='sec') | list | tojson }},
+  gd:  {{ m | map(attribute='global_diff') | list | tojson }},
+  pz:  {{ m | map(attribute='cell_primary') | list | tojson }},
+  sz:  {{ m | map(attribute='cell_secondary') | list | tojson }},
+  hc:  {{ m | map(attribute='hist_change') | list | tojson }},
+};
+const maxGd = Math.max(...DATA.gd);
+document.getElementById('kSecs').textContent = DATA.sec.length.toLocaleString();
+document.getElementById('kPeak').textContent = maxGd.toLocaleString();
+
+new Chart(document.getElementById('motionLine'), {
+  type:'line', data:{ labels: DATA.sec, datasets:[{ data:DATA.gd, borderColor:'#22d3ee', backgroundColor:'rgba(34,211,238,.12)', fill:true, borderWidth:2, pointRadius:0, tension:.15 }] },
+  options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false}, tooltip:{mode:'index'} },
+    scales:{ x:{ ticks:{color:'#64748b', maxTicksLimit:12}, grid:{display:false} }, y:{ beginAtZero:true, ticks:{ color:'#94a3b8' }, grid:{ color:'rgba(255,255,255,.06)' } } } }
+});
+new Chart(document.getElementById('zoneLine'), {
+  type:'line', data:{ labels:DATA.sec, datasets:[
+    { label:'Primary (writing)', data:DATA.pz, borderColor:'#34d399', backgroundColor:'rgba(52,211,153,.10)', fill:true, borderWidth:2, pointRadius:0 },
+    { label:'Secondary (crew)', data:DATA.sz, borderColor:'#fbbf24', borderWidth:2, pointRadius:0 }] },
+  options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{labels:{color:'#cbd5e1'}} },
+    scales:{ x:{ ticks:{color:'#64748b',maxTicksLimit:12}, grid:{display:false} }, y:{ beginAtZero:true, ticks:{color:'#94a3b8'}, grid:{color:'rgba(255,255,255,.06)'} } } }
+});
+new Chart(document.getElementById('histLine'), {
+  type:'line', data:{ labels:DATA.sec, datasets:[{ data:DATA.hc, borderColor:'#a78bfa', backgroundColor:'rgba(167,139,250,.12)', fill:true, borderWidth:2, pointRadius:0 }] },
+  options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false} },
+    scales:{ x:{ ticks:{color:'#64748b',maxTicksLimit:12}, grid:{display:false} }, y:{ beginAtZero:true, ticks:{color:'#94a3b8'}, grid:{color:'rgba(255,255,255,.06)'} } } }
+});
+</script>
+{% endblock %}

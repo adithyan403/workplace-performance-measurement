@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+{% block heading %}Reports &amp; Exports{% endblock %}
+
+{% block content %}
+<div class="grid2">
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-file-earmark-pdf"></i> WPM Duty Report (PDF)</div>
+    <p class="text-muted" style="font-size:.85rem">
+      Generates a multi-page colour report from the current MongoDB duty logs:
+      overview KPIs, activity donut, VA/NVA bars, event-log extract and workspace
+      analytics — following the paper's REPORTING module deliverable.
+    </p>
+    {% if report_exists %}
+    <div class="mb-3 text-success" style="font-size:.85rem"><i class="bi bi-check-circle"></i> Report already generated</div>
+    {% endif %}
+    <div class="d-flex gap-2 flex-wrap">
+      <button class="btn btn-grad" id="btnGen"><i class="bi bi-gear-fill"></i> Generate</button>
+      <a class="btn btn-ghost" href="{{ url_for('reports_download') }}"><i class="bi bi-download"></i> Download PDF</a>
+    </div>
+    <div id="repStatus" class="mt-3"></div>
+  </div>
+
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-diagram-3"></i> Method Alignment</div>
+    <p style="font-size:.83rem;color:var(--muted)">
+      This project follows Nesterak <i>et al.</i> (2025) <i>Workplace performance measurement:
+      digitalization of work observation and analysis</i> (J. Intell. Manuf. 36, 3569–3585):
+    </p>
+    <ul class="small" style="color:var(--muted);padding-left:1.2rem">
+      <li><b class="text-info">VIDEO</b> — camera acquisition &amp; digitalization to 1 Hz frames</li>
+      <li><b class="text-info">PROCESS</b> — activity catalogue, zones, thresholds define the model</li>
+      <li><b class="text-info">ANALYSIS</b> — motion metrics → event log → VA/NVA discovery</li>
+      <li><b class="text-info">AUTOMATION</b> — ML classifies frames → auto duty logs &amp; value analysis</li>
+      <li><b class="text-info">REPORTING</b> — dashboards (this site) &amp; PDF KPI reports</li>
+    </ul>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('btnGen').addEventListener('click', async () => {
+  const st = document.getElementById('repStatus');
+  st.innerHTML = '<div class="spinner-border spinner-border-sm text-info"></div> generating…';
+  try {
+    const r = await fetch('{{ url_for("reports_generate") }}', {method:'POST'});
+    const j = await r.json();
+    if (j.ok) { st.innerHTML = `<div class="alert alert-success p-2" style="font-size:.85rem">Report ready (${(j.size/1024).toFixed(0)} KB). <a href="${location.pathname.replace('/reports','')}/reports/download">Download</a></div>`; }
+    else st.innerHTML = `<div class="alert alert-warning p-2" style="font-size:.85rem">${j.error}</div>`;
+  } catch (e) { st.innerHTML = `<div class="alert alert-danger p-2">${e}</div>`; }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,37 @@
+{
+  "process_name": "Station-Master Waybill Entry (KSRTC)",
+  "process_description": "Manual entry of duty waybills by the station master, observed via 4K bedside camera.",
+  "db": {
+    "name": "WPM",
+    "collections": {
+      "duty_logs": "duty_logs",
+      "prediction_logs": "prediction_logs"
+    }
+  },
+  "activities": [
+    {"id": "WRITE", "label": "Writing / Data Entry", "va": true,  "color": "#22c55e"},
+    {"id": "CREW",  "label": "Crew Interaction",     "va": false, "color": "#ef4444"},
+    {"id": "CHECK", "label": "Checking / Cross-verify","va": false, "color": "#f59e0b"},
+    {"id": "PAGE",  "label": "Page / Document Flip", "va": false, "color": "#a855f7"},
+    {"id": "WAIT",  "label": "Waiting / Idle",       "va": false, "color": "#64748b"}
+  ],
+  "grid": {"rows": 3, "cols": 4},
+  "zones": {
+    "primary": 11,
+    "secondary": 10,
+    "cell_mean": [9.926, 16.880, 14.966, 9.806, 6.762, 10.184, 9.586, 6.889, 4.717, 5.570, 5.470, 4.958]
+  },
+  "thresholds": {
+    "p_hi": 2172957.25,
+    "p_mid": 1237664.40,
+    "p_lo": 831788.00,
+    "p_cell": 6.1242,
+    "p_hist": 0.0928
+  },
+  "ml": {
+    "feature_size": 2848,
+    "classes": ["WRITE", "CREW", "CHECK", "PAGE", "WAIT"],
+    "model_path": "data/model.joblib",
+    "sample_frames_dir": "static/sample_frames"
+  }
+}

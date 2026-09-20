@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block heading %}Duty Dashboard{% endblock %}
+{% block head %}
+<style>
+  .hero-va { color:#4ade80; } .hero-nva { color:#f87171; }
+</style>
+{% endblock %}
+
+{% block content %}
+{% set vanva = summary.va_nva %}
+{% set va = vanva.VA.pct | round(1) %}
+{% set nva = vanva.NVA.pct | round(1) %}
+{% set total_s = summary.total_sec %}
+{% set hh = (total_s // 3600) % 24 %}
+{% set mm = (total_s // 60) % 60 %}
+{% set ss = total_s % 60 %}
+
+<div class="kpi">
+  <div class="box card-wpm" style="--glow:rgba(34,197,94,.18)">
+    <div class="num hero-va">{{ va }}%</div>
+    <div class="lbl">Value-Added</div>
+    <div class="mini">{{ vanva.VA.sec | format_ns }} s duty time</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(239,68,68,.18)">
+    <div class="num hero-nva">{{ nva }}%</div>
+    <div class="lbl">Non-Value-Added</div>
+    <div class="mini">{{ vanva.NVA.sec | format_ns }} s wasted / waiting</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(34,211,238,.20)">
+    <div class="num">{{ summary.event_count | format_ns }}</div>
+    <div class="lbl">Activity Events</div>
+    <div class="mini">start/end timestamps logged</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(250,204,21,.16)">
+    <div class="num">{{ "%02d:%02d:%02d" | format(hh, mm, ss) }}</div>
+    <div class="lbl">Observed Duty Time</div>
+    <div class="mini">{{ total_s | format_ns }} seconds of video</div>
+  </div>
+</div>
+
+<div class="grid2">
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-pie-chart"></i> Activity Distribution</div>
+    <div style="height:300px"><canvas id="donutAct"></canvas></div>
+  </div>
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-bezier2"></i> Value vs Non-Value Time</div>
+    <div style="height:300px"><canvas id="vaBars"></canvas></div>
+  </div>
+</div>
+
+<div class="card-wpm">
+  <div class="card-title"><i class="bi bi-list-ul"></i> Activity Mix</div>
+  <div class="scroll-x">
+    <table class="table table-wpm">
+      <thead><tr><th>Activity</th><th>Events</th><th>Seconds</th><th>Share</th><th>Role</th></tr></thead>
+      <tbody>
+      {% for a in activities %}
+        {% set d = summary.activity_distribution.get(a.id, {'count':0,'sec':0}) %}
+        {% set p = d.sec * 100 // total_s if total_s else 0 %}
+        <tr>
+          <td><span class="dot" style="background:{{ a.color }}"></span>{{ a.label }}</td>
+          <td>{{ d.count | format_ns }}</td>
+          <td>{{ d.sec | format_ns }}</td>
+          <td style="min-width:200px">
+            <div class="progress" role="progressbar" style="height:10px;background:rgba(255,255,255,.08)">
+              <div class="progress-bar" style="width:{{ p }}%;background:{{ a.color }}"></div>
+            </div>
+            <span class="text-muted" style="font-size:.72rem">{{ p }}%</span>
+          </td>
+          <td>
+            {% if a.va %}<span class="badge-act badge-va">VA</span>
+            {% else %}<span class="badge-act badge-nva">NVA</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card-wpm mt-3">
+  <div class="card-title"><i class="bi bi-stack"></i> WPM Module Pipeline</div>
+  <div class="row text-center g-3">
+    {% for m in [
+        ('VIDEO','Camera · digitalization','bi-camera', '#0ea5e9'),
+        ('PROCESS','Model · catalogue · zones','bi-diagram-3', '#8b5cf6'),
+        ('ANALYSIS','Metrics · event log · VA/NVA','bi-graph-up-arrow', '#f59e0b'),
+        ('AUTOMATION','ML prediction · auto-logs','bi-cpu', '#22d3ee'),
+        ('REPORTING','Dashboards · PDF reports','bi-file-earmark-pdf', '#34d399')] %}
+    <div class="col-6 col-md">
+      <div class="p-3 rounded-3" style="background:rgba(255,255,255,.04);border:1px solid var(--line)">
+        <div class="mb-2"><i class="bi {{ m[2] }}" style="font-size:1.5rem;color:{{ m[3] }}"></i></div>
+        <div style="font-weight:800;font-size:.8rem">{{ m[0] }}</div>
+        <div style="font-size:.68rem;color:var(--muted)">{{ m[1] }}</div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+{% set ch = chart %}
+{% set vanva = summary.va_nva %}
+const PROD = {
+  labels: {{ ch.labels | tojson }},
+  colors: {{ ch.colors | tojson }},
+  sec: {{ ch.sec | tojson }},
+  pct: {{ ch.pct | tojson }},
+};
+new Chart(document.getElementById('donutAct'), {
+  type: 'doughnut',
+  data: {
+    labels: PROD.labels,
+    datasets: [{ data: PROD.sec, backgroundColor: PROD.colors, borderColor: 'rgba(2,6,23,.6)', borderWidth: 2 }]
+  },
+  options: { responsive:true, maintainAspectRatio:false, cutout:'62%',
+    plugins: { legend:{ position:'right', labels:{ color:'#cbd5e1', boxWidth:12, font:{size:11} } },
+      tooltip: { callbacks: { label: c => ` ${c.label}: ${c.parsed}s (${PROD.pct[c.dataIndex]}%)` } } } }
+});
+new Chart(document.getElementById('vaBars'), {
+  type: 'bar',
+  data: {
+    labels: ['Value-Added', 'Non-Value-Added'],
+    datasets: [{ data: [{{ vanva.VA.sec }}, {{ vanva.NVA.sec }}],
+      backgroundColor: ['#22c55e', '#ef4444'], borderRadius: 10, barPercentage: 0.5 }]
+  },
+  options: { responsive:true, maintainAspectRatio:false,
+    plugins: { legend:{ display:false },
+      tooltip:{ callbacks:{ label: c => ` ${c.parsed.y} s (${c.dataIndex===0?'VA':'NVA'})` } } },
+    scales: { y:{ beginAtZero:true, ticks:{ color:'#94a3b8' }, grid:{ color:'rgba(255,255,255,.06)' } },
+              x:{ ticks:{ color:'#cbd5e1' }, grid:{ display:false } } } }
+});
+</script>
+{% endblock %}

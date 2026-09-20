@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ML artifacts that are rebuilt locally (keep model.joblib shipped)
+data/X_features.npz
+
+# logs & temp
+*.log
+data/_flask*.log
+data/_t.py
+.ds_store
+Thumbs.db
+
+# secrets — never commit the DB URI
+.env
+*.env
