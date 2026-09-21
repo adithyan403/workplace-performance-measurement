@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% block title %}Video Activities{% endblock %}
+{% block heading %}Activity Clips from the Video{% endblock %}
+
+{% block content %}
+{% if not video_ok %}
+<div class="alert alert-warning">
+  <i class="bi bi-exclamation-triangle"></i>
+  Source video not found at <code class="kbd">{{ video_path }}</code>. Set the
+  <code class="kbd">VIDEO_PATH</code> env var (or <code class="kbd">VIDEO_SOURCE</code>)
+  to a video on this host to enable clip playback.
+</div>
+{% endif %}
+
+<div class="kpi">
+  <div class="box card-wpm" style="--glow:rgba(34,211,238,.18)">
+    <div class="num">{{ rows | length | format_ns }}</div>
+    <div class="lbl">Detected Events</div>
+    <div class="mini">click ▶ to play the clip</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(34,197,94,.18)">
+    <div class="num">{{ rows | selectattr('va_nva','eq','VA') | list | length | format_ns }}</div>
+    <div class="lbl">Value-Added</div>
+    <div class="mini">WRITE segments</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(239,68,68,.18)">
+    <div class="num">{{ rows | selectattr('va_nva','eq','NVA') | list | length | format_ns }}</div>
+    <div class="lbl">Non-Value-Added</div>
+    <div class="mini">CHECK / CREW / PAGE / WAIT</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(245,158,11,.18)">
+    <div class="num">{{ rows | selectattr('_clip_cached') | list | length }}</div>
+    <div class="lbl">Clips Cached</div>
+    <div class="mini">generated on first play</div>
+  </div>
+</div>
+
+<p class="text-muted mb-3" style="font-size:.85rem">
+  Each detected activity (start → end) from the observation video. Click a row's
+  <i class="bi bi-play-circle"></i> to stream that exact segment — the clip is
+  cut from the source video on demand and cached afterwards.
+</p>
+
+<div class="d-flex flex-wrap gap-2 mb-3">
+  <button class="btn btn-ghost btn-sm act-filter active" data-f="">All <span class="text-muted">({{ rows|length }})</span></button>
+  {% for a in activities %}
+  <button class="btn btn-ghost btn-sm act-filter" data-f="{{ a }}" style="border-color:{{ colors[a] }}55;color:{{ colors[a] }}">
+    {{ a }} <span class="text-muted">({{ rows | selectattr('activity','eq',a) | list | length }})</span>
+  </button>
+  {% endfor %}
+</div>
+
+<div class="card-wpm">
+  <div class="scroll-x" style="max-height:72vh;overflow-y:auto">
+    <table class="table table-wpm" id="actTable">
+      <thead class="sticky-top" style="background:#1e293b">
+        <tr><th>#</th><th>Start</th><th>End</th><th>Dur</th><th>Activity</th><th>Type</th><th>Source</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr data-act="{{ r.activity }}">
+          <td class="text-muted">{{ loop.index }}</td>
+          <td>{{ r.time_frame.start_ts }}</td>
+          <td>{{ r.time_frame.end_ts }}</td>
+          <td>{{ r.time_frame.duration_s }}s</td>
+          <td><span class="badge-act" style="background:{{ r.activity_color or colors.get(r.activity,'#94a3b8') }}22;color:{{ r.activity_color or colors.get(r.activity,'#e2e8f0') }};border:1px solid {{ r.activity_color or colors.get(r.activity,'#94a3b8') }}55">{{ r.activity }}</span></td>
+          <td>{% if r.va_nva=='VA' %}<span class="badge-act badge-va">VA</span>{% else %}<span class="badge-act badge-nva">NVA</span>{% endif %}</td>
+          <td class="text-muted" style="font-size:.72rem">{{ r.source or 'WPM' }}</td>
+          <td>
+            {% if video_ok %}
+            <div class="d-flex gap-1 flex-wrap">
+              <button class="btn btn-grad btn-sm play-btn"
+                      data-start="{{ r.time_frame.start_sec }}"
+                      data-end="{{ r.time_frame.end_sec }}"
+                      data-label="{{ r.activity }} · {{ r.time_frame.start_ts }} – {{ r.time_frame.end_ts }}">
+                <i class="bi bi-play-circle"></i> Clip
+              </button>
+              <button class="btn btn-ghost btn-sm frames-btn"
+                      data-start="{{ r.time_frame.start_sec }}"
+                      data-end="{{ r.time_frame.end_sec }}"
+                      data-label="{{ r.activity }} · {{ r.time_frame.start_ts }} – {{ r.time_frame.end_ts }}">
+                <i class="bi bi-images"></i> 1s Frames
+              </button>
+            </div>
+            {% else %}
+            <div class="d-flex gap-1 flex-wrap">
+              <button class="btn btn-ghost btn-sm frames-btn"
+                      data-start="{{ r.time_frame.start_sec }}"
+                      data-end="{{ r.time_frame.end_sec }}"
+                      data-label="{{ r.activity }} · {{ r.time_frame.start_ts }} – {{ r.time_frame.end_ts }}">
+                <i class="bi bi-images"></i> 1s Frames
+              </button>
+            </div>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- video modal -->
+<div class="modal fade" id="clipModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-content" style="background:#0f172a;border:1px solid var(--line)">
+      <div class="modal-header border-0">
+        <h5 class="modal-title"><i class="bi bi-camera-video me-2 text-info"></i><span id="clipLabel"></span></h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-0">
+        <video id="clipPlayer" class="w-100" controls autoplay style="max-height:62vh;background:#000"></video>
+        <div class="frames-card p-3">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-semibold" style="font-size:.85rem"><i class="bi bi-images me-2 text-cyan"></i>1-second frames <span class="text-muted">(per second of this activity)</span></div>
+            <span id="frameCount" class="text-muted" style="font-size:.75rem"></span>
+          </div>
+          <div class="frame-strip d-flex gap-2" id="frameStrip" style="overflow-x:auto;padding-bottom:.5rem"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CLI = {{ colors | tojson }};
+document.querySelectorAll('.play-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const s = btn.dataset.start, e = btn.dataset.end;
+    document.getElementById('clipLabel').textContent = btn.dataset.label;
+    const v = document.getElementById('clipPlayer');
+    v.src = `/clip/${s}/${e}`;
+    v.load(); v.play();
+    loadFrames(s, e);
+    const m = bootstrap.Modal.getOrCreateInstance(document.getElementById('clipModal'));
+    m.show();
+  });
+});
+document.querySelectorAll('.frames-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('clipLabel').textContent = btn.dataset.label;
+    const v = document.getElementById('clipPlayer');
+    v.pause(); v.removeAttribute('src'); v.load();
+    loadFrames(btn.dataset.start, btn.dataset.end);
+    const m = bootstrap.Modal.getOrCreateInstance(document.getElementById('clipModal'));
+    m.show();
+  });
+});
+async function loadFrames(s, e) {
+  const strip = document.getElementById('frameStrip');
+  strip.innerHTML = '<span class="text-muted" style="font-size:.8rem">loading frames…</span>';
+  document.getElementById('frameCount').textContent = '';
+  try {
+    const r = await fetch(`/frames/${s}/${e}`);
+    const j = await r.json();
+    if (!j.ok || !j.frames.length) {
+      strip.innerHTML = '<span class="text-muted" style="font-size:.8rem">no frames found for this range</span>';
+      return;
+    }
+    document.getElementById('frameCount').textContent = `${j.frames.length} frame${j.frames.length>1?'s':''}${j.trimmed?' (trimmed '+(1+e-s-j.frames.length)+')':''}`;
+    strip.innerHTML = j.frames.map(f => `
+      <div class="frame-thumb" style="min-width:110px;flex:0 0 auto" title="sec ${f.sec}  ${f.ts}">
+        <a href="${f.url}" target="_blank" rel="noopener">
+          <img src="${f.url}" loading="lazy" style="width:110px;height:62px;object-fit:cover;border-radius:8px;border:1px solid var(--line)"/>
+        </a>
+        <div class="text-muted text-center" style="font-size:.62rem;margin-top:2px">${f.ts}</div>
+      </div>`).join('');
+  } catch (err) {
+    strip.innerHTML = '<span class="text-danger" style="font-size:.8rem">failed to load frames</span>';
+  }
+}
+document.getElementById('clipModal').addEventListener('hidden.bs.modal', () => {
+  const v = document.getElementById('clipPlayer');
+  v.pause(); v.removeAttribute('src'); v.load();
+});
+// activity filter chips
+document.querySelectorAll('.act-filter').forEach(ch => {
+  ch.addEventListener('click', () => {
+    document.querySelectorAll('.act-filter').forEach(c => c.classList.remove('active'));
+    ch.classList.add('active');
+    const f = ch.dataset.f;
+    document.querySelectorAll('#actTable tbody tr').forEach(tr => {
+      tr.style.display = (!f || tr.dataset.act === f) ? '' : 'none';
+    });
+  });
+});
+</script>
+{% endblock %}

@@ -112,6 +112,7 @@
       <a class="nav-item {{ 'active' if request.endpoint=='dashboard' }}" href="{{ url_for('dashboard') }}"><i class="bi bi-speedometer2"></i> Dashboard</a>
       <a class="nav-item {{ 'active' if request.endpoint=='analysis_view' }}" href="{{ url_for('analysis_view') }}"><i class="bi bi-bar-chart-line"></i> Analysis</a>
       <a class="nav-item {{ 'active' if request.endpoint=='logs_view' }}" href="{{ url_for('logs_view') }}"><i class="bi bi-journal-text"></i> Duty Logs</a>
+      <a class="nav-item {{ 'active' if request.endpoint=='activities_view' }}" href="{{ url_for('activities_view') }}"><i class="bi bi-play-btn"></i> Video Activities</a>
       <a class="nav-item {{ 'active' if request.endpoint=='ml_view' }}" href="{{ url_for('ml_view') }}"><i class="bi bi-cpu"></i> ML Automation</a>
       <a class="nav-item {{ 'active' if request.endpoint=='reports_view' }}" href="{{ url_for('reports_view') }}"><i class="bi bi-file-earmark-pdf"></i> Reports</a>
     </nav>

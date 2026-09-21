@@ -16,6 +16,9 @@ data/_t.py
 .ds_store
 Thumbs.db
 
+# generated clip + frame cache
+static/clips/
+
 # secrets — never commit the DB URI
 .env
 *.env

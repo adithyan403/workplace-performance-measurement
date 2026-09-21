@@ -81,6 +81,24 @@
 </div>
 
 <div class="card-wpm mt-3">
+  <div class="card-title"><i class="bi bi-magic"></i> ML Automation — Retrain &amp; Re-predict</div>
+  <p class="text-muted" style="font-size:.85rem">
+    Re-train the Random-Forest classifier on the labelled frames, or re-run the
+    model over <b>the whole video</b> to regenerate duty events, auto-log them to
+    <code class="kbd">{{ db_name }}.{{ col_duty }}</code> and refresh the VA/NVA split.
+    These run as background jobs.
+  </p>
+  <div class="d-flex gap-2 flex-wrap">
+    <button class="btn btn-grad" id="btnRetrain"><i class="bi bi-cpu"></i> Retrain Model</button>
+    <button class="btn btn-grad" id="btnPredict"><i class="bi bi-repeat"></i> Re-predict Whole Video</button>
+    <span class="btn btn-ghost disabled" id="jobBadge" style="min-width:340px">
+      <i class="bi bi-hourglass-split"></i> <span id="jobText">idle</span>
+    </span>
+  </div>
+  <div id="jobResult" class="mt-3"></div>
+</div>
+
+<div class="card-wpm mt-3">
   <div class="card-title"><i class="bi bi-stack"></i> WPM Module Pipeline</div>
   <div class="row text-center g-3">
     {% for m in [
@@ -134,5 +152,58 @@ new Chart(document.getElementById('vaBars'), {
     scales: { y:{ beginAtZero:true, ticks:{ color:'#94a3b8' }, grid:{ color:'rgba(255,255,255,.06)' } },
               x:{ ticks:{ color:'#cbd5e1' }, grid:{ display:false } } } }
 });
+
+/* --------------- ML automation job controls --------------- */
+const jobText = document.getElementById('jobText');
+const jobBadge = document.getElementById('jobBadge');
+const jobResult = document.getElementById('jobResult');
+let pollTimer = null;
+
+async function startJob(url, body, label) {
+  jobResult.innerHTML = '';
+  const res = await fetch(url, { method: 'POST', body });
+  const j = await res.json();
+  if (!j.ok) { jobResult.innerHTML = `<div class="alert alert-danger p-2" style="font-size:.85rem">${j.error}</div>`; return; }
+  jobText.textContent = `${label}: 0%`;
+  jobBadge.classList.remove('disabled');
+  pollTimer = setInterval(() => poll(j.job), 1200);
+}
+
+async function poll(jid) {
+  const r = await fetch(`/api/jobs/${jid}`);
+  const j = await r.json();
+  if (!j.ok) { clearInterval(pollTimer); jobText.textContent = 'job not found'; return; }
+  jobText.textContent = `${j.kind}: ${j.status}${j.message?` — ${j.message}`:''}`;
+  if (j.status === 'done') {
+    clearInterval(pollTimer);
+    jobText.textContent = j.kind + ': done ✓';
+    jobBadge.classList.add('disabled');
+    renderJobResult(j);
+  } else if (j.status === 'error') {
+    clearInterval(pollTimer);
+    jobText.textContent = j.kind + ': error';
+    jobResult.innerHTML = `<div class="alert alert-danger p-2" style="font-size:.85rem">${j.error}</div>`;
+  }
+}
+
+function renderJobResult(j) {
+  const r = j.result || {};
+  if (j.kind === 'retrain') {
+    jobResult.innerHTML = `<div class="alert alert-success p-2" style="font-size:.85rem">
+      Retrained on <b>${r.samples}</b> frames · hold-out accuracy
+      <b>${(r.accuracy*100).toFixed(1)}%</b> (train ${r.n_train} / test ${r.n_test}).
+      <a href="${location.pathname.replace('#','')}/ml" style="text-decoration:underline">Open ML page →</a></div>`;
+  } else {
+    const v = r.va_nva || {};
+    const mix = Object.entries(r.activity_mix || {}).map(([k, v]) => `${k}:${v}`).join(' · ');
+    jobResult.innerHTML = `<div class="alert alert-success p-2" style="font-size:.85rem">
+      <b>${r.n_frames}</b> frames → <b>${r.n_events}</b> duty events ·
+      VA <b class="text-success">${v.VA?.pct ?? '—'}%</b> / NVA <b class="text-danger">${v.NVA?.pct ?? '—'}%</b> ·
+      Mongo inserts <b>${r.inserted_mongo}</b><br><span class="text-muted">${mix}</span></div>`;
+  }
+}
+
+document.getElementById('btnRetrain').addEventListener('click', () => startJob('/ml/retrain', new FormData(), 'Retrain'));
+document.getElementById('btnPredict').addEventListener('click', () => startJob('/ml/predict-full', new FormData(), 'Re-predict'));
 </script>
 {% endblock %}

@@ -128,3 +128,31 @@ class VideoModule:
         if img is None:
             raise RuntimeError(f"decode failed {p}")
         return img
+
+    # ------------------------------------------------------------------ #
+    # clip generation: cut a segment out of the source video (cached)    #
+    # ------------------------------------------------------------------ #
+    def cut_clip(self, video_path, start_sec, duration_sec, out_path,
+                 max_width=960, cap_duration=30):
+        """Fast-seek a clip with ffmpeg from the (possibly huge) source video,
+        scaled down for streaming. Returns the output path or raises."""
+        ffmpeg = self._find_ffmpeg()
+        if not ffmpeg:
+            raise RuntimeError("ffmpeg not found (set env FFMPEG)")
+        out = Path(out_path)
+        if out.exists() and out.stat().st_size > 0:
+            return str(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        dur = min(float(duration_sec), float(cap_duration))
+        start = max(0, float(start_sec))
+        vf = f"scale={max_width}:-2"
+        cmd = [ffmpeg, "-y", "-loglevel", "error",
+               "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
+               "-i", str(video_path),
+               "-vf", vf, "-c:v", "libx264", "-preset", "veryfast",
+               "-crf", "26", "-an", "-movflags", "+faststart", str(out)]
+        import subprocess
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        if p.returncode != 0 or not out.exists():
+            raise RuntimeError(f"ffmpeg clip failed: {p.stderr[-500:]}")
+        return str(out)

@@ -40,6 +40,8 @@ app.secret_key = os.environ.get("SECRET_KEY", "wpm-secret")
 
 MONGO_URI = os.environ.get("MONGO_URI", "")
 FRAME_DIR = os.environ.get("FRAME_DIR", "")
+VIDEO_PATH = os.environ.get("VIDEO_PATH", r"D:\ksrtc\VID_20260819_135332150.mp4")
+CLIP_DIR = ROOT / "static" / "clips"
 DB_NAME = "WPM"
 
 cfg_file = ROOT / "config" / "process_config.json"
@@ -51,8 +53,38 @@ video = VideoModule(proc.cfg, ROOT)
 
 MODEL_PATH = ROOT / proc.cfg["ml"]["model_path"]
 REPORT_PATH = ROOT / "outputs" / "WPM_Duty_Report.pdf"
+CLIP_DIR = ROOT / "static" / "clips"
 
 # ---------------------------------------------------------------- helpers -- #
+# simple background job registry (in-memory; per-process)
+import threading as _threading
+_JOBS = {}
+_JOBS_LOCK = _threading.Lock()
+
+def start_job(kind, fn, *args, **kwargs):
+    jid = f"{kind}-{os.urandom(3).hex()}"
+    with _JOBS_LOCK:
+        _JOBS[jid] = {"id": jid, "kind": kind, "status": "running",
+                      "progress": 0, "message": "started", "result": None, "error": None}
+    def _run():
+        try:
+            res = fn(*args, **kwargs)
+            with _JOBS_LOCK:
+                _JOBS[jid]["status"] = "done"
+                _JOBS[jid]["progress"] = 100
+                _JOBS[jid]["result"] = res
+        except Exception as e:
+            with _JOBS_LOCK:
+                _JOBS[jid]["status"] = "error"
+                _JOBS[jid]["error"] = str(e)
+    t = _threading.Thread(target=_run, daemon=True)
+    t.start()
+    return jid
+
+def get_job(jid):
+    with _JOBS_LOCK:
+        return _JOBS.get(jid)
+
 def get_mongo():
     if not (_MONGO and MONGO_URI):
         return None
@@ -259,6 +291,138 @@ def reports_download():
         return jsonify({"ok": False, "error": "no report yet"}), 404
     return send_file(REPORT_PATH, as_attachment=True,
                      download_name="WPM_Duty_Report.pdf")
+
+@app.route("/frame/<int:sec>")
+def frame_sec(sec):
+    """Serve the 1-second frame JPG for a given second (0-based)."""
+    if FRAME_DIR and os.path.isdir(FRAME_DIR):
+        cand = Path(FRAME_DIR) / f"f_{sec + 1:04d}.jpg"
+    else:
+        cand = ROOT / "static" / "sample_frames" / f"f_{sec + 1:04d}.jpg"
+    if not cand.exists():
+        return jsonify({"ok": False, "error": f"frame f_{sec + 1:04d}.jpg not found"}), 404
+    return send_file(cand, mimetype="image/jpeg", conditional=True)
+
+@app.route("/frames/<int:start>/<int:end>")
+def frames_range(start, end):
+    """List the per-second frames covering one event (sec range inclusive)."""
+    secs = list(range(max(0, start), max(start, end) + 1))
+    step = 1 if len(secs) <= 60 else max(1, round(len(secs) / 60))
+    out = []
+    for s in secs[::step]:
+        if FRAME_DIR and os.path.isdir(FRAME_DIR):
+            p = Path(FRAME_DIR) / f"f_{s + 1:04d}.jpg"
+        else:
+            p = ROOT / "static" / "sample_frames" / f"f_{s + 1:04d}.jpg"
+        if not p.exists():
+            continue
+        out.append({"sec": s, "ts": automation._ts(s),
+                    "url": url_for("frame_sec", sec=s)})
+    return jsonify({"ok": True, "frames": out, "trimmed": len(secs) != len(out)})
+
+@app.route("/activities")
+def activities_view():
+    """List every activity detected in the video with a playable clip."""
+    rows = load_duty_logs(limit=10000) or []
+    clip_dir = CLIP_DIR
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    # annotate cached clip existence for each event
+    annotated = []
+    for r in rows:
+        r = dict(r)
+        start = r["time_frame"]["start_sec"]; end = r["time_frame"]["end_sec"]
+        r["_clip_url"] = url_for("event_clip", start=start, end=end)
+        r["_clip_cached"] = _clip_cache_file(start, end).exists()
+        annotated.append(r)
+    video_ok = os.path.exists(VIDEO_PATH)
+    return render_template("activities.html", rows=annotated,
+                           activities=[a["id"] for a in proc.cfg["activities"]],
+                           colors={a["id"]: a["color"] for a in proc.cfg["activities"]},
+                           video_ok=video_ok, video_path=VIDEO_PATH)
+
+def _clip_cache_file(start, end):
+    return CLIP_DIR / f"clip_{start}_{end}.mp4"
+
+@app.route("/clip/<int:start>/<int:end>")
+def event_clip(start, end):
+    """Stream (or lazily generate + cache) the video segment covering an event."""
+    if not video._find_ffmpeg():
+        return jsonify({"ok": False, "error": "ffmpeg not available on this host."}), 400
+    cache = _clip_cache_file(start, end)
+    try:
+        src = os.environ.get("VIDEO_SOURCE", VIDEO_PATH)
+        video.cut_clip(src, start, max(1, end - start + 1), cache,
+                       max_width=960, cap_duration=30)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"clip failed: {e}"}), 500
+    return send_file(cache, mimetype="video/mp4", conditional=True)
+
+@app.route("/api/jobs/<jid>")
+def job_status(jid):
+    j = get_job(jid)
+    if j is None:
+        return jsonify({"ok": False, "error": "unknown job"}), 404
+    return jsonify(j)
+
+@app.route("/ml/retrain", methods=["POST"])
+def ml_retrain():
+    """Background retrain of the ML model from the labelled frames."""
+    frame_dir = request.form.get("frame_dir", "") or FRAME_DIR
+    if not frame_dir or not os.path.isdir(frame_dir):
+        return jsonify({"ok": False, "error":
+                        "FRAME_DIR not set on this host; provide frame_dir."}), 400
+    jid = start_job("retrain", _do_retrain, frame_dir)
+    return jsonify({"ok": True, "job": jid})
+
+def _do_retrain(frame_dir):
+    # labels come from the bundled Phase-I event log (start/end/activity)
+    ev_sample = ROOT / "data" / "event_log_sample.json"
+    locate_label = {}
+    if ev_sample.exists():
+        for e in json.loads(ev_sample.read_text(encoding="utf-8")):
+            tf = e["time_frame"]
+            for s in range(int(tf["start_sec"]), int(tf["end_sec"]) + 1):
+                locate_label[s] = e["activity"]
+    X, y, secs = automation.build_dataset(frame_dir, sec_labels=locate_label)
+    if len(X) < 50:
+        raise RuntimeError(f"too few frames ({len(X)}) to train")
+    report = automation.train(X, y, MODEL_PATH)
+    (ROOT / "data" / "training_report.json").write_text(
+        json.dumps(report, default=str), encoding="utf-8")
+    return {"accuracy": round(report["accuracy"], 4),
+            "samples": int(len(X)), "n_train": int(report["n_train"]),
+            "n_test": int(report["n_test"])}
+
+@app.route("/ml/predict-full", methods=["POST"])
+def ml_predict_full():
+    """Background re-prediction of the whole video + auto-log to Mongo."""
+    frame_dir = request.form.get("frame_dir", "") or FRAME_DIR
+    if not frame_dir or not os.path.isdir(frame_dir):
+        return jsonify({"ok": False, "error":
+                        "FRAME_DIR not set on this host; provide frame_dir."}), 400
+    if not MODEL_PATH.exists():
+        return jsonify({"ok": False, "error": "model not trained yet."}), 400
+    max_frames = int(request.form.get("max_frames", 0) or 0)
+    auto_log = request.form.get("auto_log", "1") == "1"
+    jid = start_job("predict_full", _do_predict_full, frame_dir,
+                    max_frames or None, auto_log)
+    return jsonify({"ok": True, "job": jid})
+
+def _do_predict_full(frame_dir, max_frames, auto_log):
+    secs, preds = automation.predict_frames(frame_dir, MODEL_PATH,
+                                            start_sec=0, max_frames=max_frames)
+    events = automation.predictions_to_events(secs, preds)
+    for e in events:
+        e["va_nva"] = "VA" if proc.is_va(e["activity"]) else "NVA"
+    vanva = automation.find_va_nva(events)
+    inserted = 0
+    if auto_log and MONGO_URI:
+        inserted = automation.auto_log(events, MONGO_URI).get("inserted", 0)
+    return {"n_frames": len(preds), "n_events": len(events),
+            "inserted_mongo": inserted, "va_nva": vanva,
+            "activity_mix": {
+                a: sum(1 for e in events if e["activity"] == a)
+                for a in proc.cfg["ml"]["classes"]}}
 
 @app.route("/api/health")
 def health():
