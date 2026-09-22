@@ -40,7 +40,12 @@ app.config["MAX_CONTENT_LENGTH"] = 256 * 1024 * 1024
 app.secret_key = os.environ.get("SECRET_KEY", "wpm-secret")
 
 MONGO_URI = os.environ.get("MONGO_URI", "")
-FRAME_DIR = os.environ.get("FRAME_DIR", "")
+FRAME_DIR = next(
+    (p for p in (os.environ.get("FRAME_DIR", ""),
+                 r"D:\ksrtc\frames_1s",
+                 str(ROOT / "static" / "sample_frames"))
+     if p and os.path.isdir(p)),
+    "")
 VIDEO_PATH = os.environ.get("VIDEO_PATH", r"D:\ksrtc\VID_20260819_135332150.mp4")
 CLIP_DIR = ROOT / "static" / "clips"
 DB_NAME = "WPM"

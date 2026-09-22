@@ -10,7 +10,7 @@ services:
       - key: MONGO_URI
         sync: false        # set this in Render dashboard
       - key: FRAME_DIR
-        value: ""
+        sync: false        # optional; falls back to static/sample_frames
       - key: SECRET_KEY
         generateValue: true
     disk:
