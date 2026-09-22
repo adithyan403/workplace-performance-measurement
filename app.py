@@ -24,6 +24,7 @@ from modules.video_module import VideoModule
 from modules.analysis_module import AnalysisModule
 from modules.automation_module import AutomationModule
 from modules.reporting_module import ReportingModule
+from modules.b2_module import B2Module
 
 try:
     import pymongo
@@ -54,6 +55,11 @@ video = VideoModule(proc.cfg, ROOT)
 MODEL_PATH = ROOT / proc.cfg["ml"]["model_path"]
 REPORT_PATH = ROOT / "outputs" / "WPM_Duty_Report.pdf"
 CLIP_DIR = ROOT / "static" / "clips"
+
+# --------------------------------------------------------------------------- #
+# Backblaze B2 asset store (frames + clips)                                   #
+# --------------------------------------------------------------------------- #
+b2 = B2Module(ROOT / "static" / "b2cache")
 
 # ---------------------------------------------------------------- helpers -- #
 # simple background job registry (in-memory; per-process)
@@ -88,7 +94,9 @@ def get_job(jid):
 def get_mongo():
     if not (_MONGO and MONGO_URI):
         return None
-    return pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=12000)
+    if not getattr(get_mongo, "_client", None):
+        get_mongo._client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=12000)
+    return get_mongo._client
 
 def load_duty_logs(limit=5000, activity=None, va=None, q=None):
     client = get_mongo()
@@ -105,7 +113,6 @@ def load_duty_logs(limit=5000, activity=None, va=None, q=None):
         filt["time_frame.start_ts"] = {"$regex": q, "$options": "i"}
     rows = list(coll.find(filt, {"_id": 0, "frames": 0}).limit(limit))
     rows.sort(key=lambda r: r.get("time_frame", {}).get("start_sec", 0))
-    client.close()
     return rows
 
 def summary_from_logs(rows):
@@ -292,16 +299,31 @@ def reports_download():
     return send_file(REPORT_PATH, as_attachment=True,
                      download_name="WPM_Duty_Report.pdf")
 
+def _local_frame(sec):
+    """Local candidate path for a frame (FRAME_DIR or bundled samples)."""
+    if FRAME_DIR and os.path.isdir(FRAME_DIR):
+        return Path(FRAME_DIR) / f"f_{sec + 1:04d}.jpg"
+    return ROOT / "static" / "sample_frames" / f"f_{sec + 1:04d}.jpg"
+
+def _fetch_frame(sec):
+    """Resolve a frame to a real file on disk (local first, then B2)."""
+    local = _local_frame(sec)
+    if local.exists():
+        return local
+    if b2.enabled:
+        cached = b2.download(f"frames/f_{sec + 1:04d}.jpg")
+        if cached:
+            return Path(cached)
+    return None
+
 @app.route("/frame/<int:sec>")
 def frame_sec(sec):
     """Serve the 1-second frame JPG for a given second (0-based)."""
-    if FRAME_DIR and os.path.isdir(FRAME_DIR):
-        cand = Path(FRAME_DIR) / f"f_{sec + 1:04d}.jpg"
-    else:
-        cand = ROOT / "static" / "sample_frames" / f"f_{sec + 1:04d}.jpg"
-    if not cand.exists():
-        return jsonify({"ok": False, "error": f"frame f_{sec + 1:04d}.jpg not found"}), 404
-    return send_file(cand, mimetype="image/jpeg", conditional=True)
+    f = _fetch_frame(sec)
+    if f is None:
+        return jsonify({"ok": False,
+                        "error": f"frame f_{sec + 1:04d}.jpg not found"}), 404
+    return send_file(f, mimetype="image/jpeg", conditional=True)
 
 @app.route("/frames/<int:start>/<int:end>")
 def frames_range(start, end):
@@ -310,11 +332,7 @@ def frames_range(start, end):
     step = 1 if len(secs) <= 60 else max(1, round(len(secs) / 60))
     out = []
     for s in secs[::step]:
-        if FRAME_DIR and os.path.isdir(FRAME_DIR):
-            p = Path(FRAME_DIR) / f"f_{s + 1:04d}.jpg"
-        else:
-            p = ROOT / "static" / "sample_frames" / f"f_{s + 1:04d}.jpg"
-        if not p.exists():
+        if _fetch_frame(s) is None:
             continue
         out.append({"sec": s, "ts": automation._ts(s),
                     "url": url_for("frame_sec", sec=s)})
@@ -326,15 +344,23 @@ def activities_view():
     rows = load_duty_logs(limit=10000) or []
     clip_dir = CLIP_DIR
     clip_dir.mkdir(parents=True, exist_ok=True)
-    # annotate cached clip existence for each event
+    # one batched B2 listing of already-uploaded clips (avoid per-row API calls)
+    b2_clips = set()
+    if b2.enabled:
+        try:
+            b2_clips = set(b2.list_keys_cached("clips/"))
+        except Exception:
+            b2_clips = set()
+    # annotate cached clip existence for each event (local disk or B2)
     annotated = []
     for r in rows:
         r = dict(r)
         start = r["time_frame"]["start_sec"]; end = r["time_frame"]["end_sec"]
         r["_clip_url"] = url_for("event_clip", start=start, end=end)
-        r["_clip_cached"] = _clip_cache_file(start, end).exists()
+        r["_clip_cached"] = (_clip_cache_file(start, end).exists()
+                             or f"clips/clip_{start}_{end}.mp4" in b2_clips)
         annotated.append(r)
-    video_ok = os.path.exists(VIDEO_PATH)
+    video_ok = (os.path.exists(VIDEO_PATH) or b2.enabled)
     return render_template("activities.html", rows=annotated,
                            activities=[a["id"] for a in proc.cfg["activities"]],
                            colors={a["id"]: a["color"] for a in proc.cfg["activities"]},
@@ -345,16 +371,34 @@ def _clip_cache_file(start, end):
 
 @app.route("/clip/<int:start>/<int:end>")
 def event_clip(start, end):
-    """Stream (or lazily generate + cache) the video segment covering an event."""
-    if not video._find_ffmpeg():
-        return jsonify({"ok": False, "error": "ffmpeg not available on this host."}), 400
+    """Stream the video segment covering an event.
+
+    Priority: local cache -> Backblaze B2 -> ffmpeg cut from source video.
+    Any freshly generated clip is also uploaded to B2 for future calls.
+    """
     cache = _clip_cache_file(start, end)
+    key = f"clips/clip_{start}_{end}.mp4"
+    if cache.exists() and cache.stat().st_size > 0:
+        return send_file(cache, mimetype="video/mp4", conditional=True)
+    if b2.enabled and b2.exists(key):
+        got = b2.download(key)
+        if got:
+            return send_file(got, mimetype="video/mp4", conditional=True)
+    # generate from local source video
+    if not video._find_ffmpeg():
+        return jsonify({"ok": False,
+                        "error": "no ffmpeg and clip not in B2/cache"}), 400
     try:
         src = os.environ.get("VIDEO_SOURCE", VIDEO_PATH)
         video.cut_clip(src, start, max(1, end - start + 1), cache,
                        max_width=960, cap_duration=30)
     except Exception as e:
         return jsonify({"ok": False, "error": f"clip failed: {e}"}), 500
+    if b2.enabled:
+        try:
+            b2.upload(key, cache)
+        except Exception:
+            pass  # local clip still usable
     return send_file(cache, mimetype="video/mp4", conditional=True)
 
 @app.route("/api/jobs/<jid>")
@@ -435,9 +479,9 @@ def health():
                           "docs": client[DB_NAME][proc.cfg["db"]["collections"]["duty_logs"]].count_documents({})}
         except Exception as e:
             mongo_info = {"ok": False, "error": str(e)}
-        finally:
-            client.close()
-    return jsonify({"status": "ok", "model": MODEL_PATH.exists(), "mongo": mongo_info})
+    return jsonify({"status": "ok", "model": MODEL_PATH.exists(), "mongo": mongo_info,
+                    "b2": {"enabled": b2.enabled,
+                           "bucket": b2.bucket_name() if b2.enabled else None}})
 
 # ------------------------------------------------------------------ main -- #
 if __name__ == "__main__":

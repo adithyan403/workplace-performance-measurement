@@ -18,6 +18,7 @@ Thumbs.db
 
 # generated clip + frame cache
 static/clips/
+static/b2cache/
 
 # secrets — never commit the DB URI
 .env
