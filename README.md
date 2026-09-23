@@ -81,8 +81,10 @@ Re-run `scripts\prepare_static_data.py` to refresh the dashboard JSON files.
 3. Set env vars:
    - `MONGO_URI` → your Atlas connection string
    - `SECRET_KEY` → random string
-   - `B2_KEY_ID` / `B2_APPLICATION_KEY` → Backblaze B2 (frames + clips, optional but recommended)
-   - `FRAME_DIR` → (optional) `static/sample_frames` for demo predictions
+   - `B2_KEY_ID` / `B2_APPLICATION_KEY` → Backblaze B2 (frames + clips, recommended)
+   - `FRAME_DIR` → (optional) full 1-second frame folder; NOT `static/sample_frames`
+     (the 12 bundled frames are a viewer fallback only — the ML options need a
+     full frame set, which they pull from B2 when `B2_*` vars are set)
 4. Build command: `pip install -r requirements.txt`
 5. Start command: `gunicorn app:app --workers 2 --threads 4 --timeout 300 --bind 0.0.0.0:$PORT`
 6. Health check path: `/api/health`

@@ -40,6 +40,19 @@ app.config["MAX_CONTENT_LENGTH"] = 256 * 1024 * 1024
 app.secret_key = os.environ.get("SECRET_KEY", "wpm-secret")
 
 MONGO_URI = os.environ.get("MONGO_URI", "")
+
+def _real_frame_dir(path):
+    """A usable ML frame dir must hold a meaningful number of f_*.jpg files.
+    The bundled sample_frames/ (12 frames) does NOT count — it's a viewer
+    fallback, not a training source. This keeps B2 materialisation in play."""
+    if not path or not os.path.isdir(path):
+        return False
+    try:
+        n = sum(1 for _ in Path(path).glob("f_*.jpg"))
+    except OSError:
+        return False
+    return n >= 50
+
 FRAME_DIR = next(
     (p for p in (os.environ.get("FRAME_DIR", ""),
                  r"D:\ksrtc\frames_1s",
@@ -72,13 +85,13 @@ _LAST_FRAME_N = 3951  # number of 1s frames extracted for this video
 def resolve_frame_dir(override=""):
     """Pick a usable frame directory for the ML options.
 
-    Priority: explicit form override -> local FRAME_DIR -> materialise all
-    3951 frames from Backblaze B2 -> bundled sample_frames (hosted demos).
-    Returns "" when nothing is available.
+    Priority: explicit form override -> local FRAME_DIR (only if it holds a
+    real frame set) -> materialise all 3951 frames from Backblaze B2 ->
+    bundled sample_frames (hosted demos). Returns "" when nothing is usable.
     """
-    if override and os.path.isdir(override):
+    if override and _real_frame_dir(override):
         return override
-    if FRAME_DIR and os.path.isdir(FRAME_DIR):
+    if _real_frame_dir(FRAME_DIR):
         return FRAME_DIR
     if b2.enabled:
         try:
@@ -291,7 +304,8 @@ def ml_predict():
     frame_dir = resolve_frame_dir(request.form.get("frame_dir", ""))
     if not frame_dir or not os.path.isdir(frame_dir):
         return jsonify({"ok": False, "error":
-                        "No frame source (local FRAME_DIR, B2 or bundled samples)."}), 400
+                        "No full frame set available. Set FRAME_DIR or B2_KEY_ID/"
+                        "B2_APPLICATION_KEY (Backblaze B2) for the ML options."}), 400
     if not MODEL_PATH.exists():
         return jsonify({"ok": False, "error": "model not trained yet."}), 400
     try:
@@ -467,9 +481,10 @@ def ml_retrain():
     Frames resolve via local FRAME_DIR or are pulled from Backblaze B2."""
     frame_dir = resolve_frame_dir(request.form.get("frame_dir", ""))
 
-    if not frame_dir or not os.path.isdir(frame_dir):
+    if not frame_dir or not os.path.isdir(frame_dir) or not _real_frame_dir(frame_dir):
         return jsonify({"ok": False, "error":
-                        "No frame source (local FRAME_DIR or B2) to train on."}), 400
+                        "Could not find a full frame set to train on. Set "
+                        "FRAME_DIR to the 1s frame folder or set B2_KEY_ID/B2_APPLICATION_KEY."}), 400
     jid = start_job("retrain", _do_retrain, frame_dir)
     return jsonify({"ok": True, "job": jid})
 
@@ -498,9 +513,10 @@ def ml_predict_full():
     Frames resolve via local FRAME_DIR or are pulled from Backblaze B2."""
     frame_dir = resolve_frame_dir(request.form.get("frame_dir", ""))
 
-    if not frame_dir or not os.path.isdir(frame_dir):
+    if not frame_dir or not os.path.isdir(frame_dir) or not _real_frame_dir(frame_dir):
         return jsonify({"ok": False, "error":
-                        "No frame source (local FRAME_DIR or B2) to predict."}), 400
+                        "Could not find a full frame set to predict. Set "
+                        "FRAME_DIR to the 1s frame folder or set B2_KEY_ID/B2_APPLICATION_KEY."}), 400
     if not MODEL_PATH.exists():
         return jsonify({"ok": False, "error": "model not trained yet."}), 400
     max_frames = int(request.form.get("max_frames", 0) or 0)

@@ -9,8 +9,12 @@ services:
     envVars:
       - key: MONGO_URI
         sync: false        # set this in Render dashboard
+      - key: B2_KEY_ID
+        sync: false        # Backblaze B2 (frames + clips). Set in dashboard.
+      - key: B2_APPLICATION_KEY
+        sync: false        # Backblaze B2 (frames + clips). Set in dashboard.
       - key: FRAME_DIR
-        sync: false        # optional; falls back to static/sample_frames
+        sync: false        # optional; full 1s frames preferred over sample_frames
       - key: SECRET_KEY
         generateValue: true
     disk:
