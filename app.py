@@ -53,12 +53,17 @@ def _real_frame_dir(path):
         return False
     return n >= 50
 
-FRAME_DIR = next(
-    (p for p in (os.environ.get("FRAME_DIR", ""),
-                 r"D:\ksrtc\frames_1s",
-                 str(ROOT / "static" / "sample_frames"))
-     if p and os.path.isdir(p)),
-    "")
+_NO_LOCAL = os.environ.get("WPM_NO_LOCAL_FRAMES", "").lower() in ("1", "true", "yes")
+
+def _candidate_dirs():
+    d = os.environ.get("FRAME_DIR", "")
+    if d:
+        return (d,)
+    if _NO_LOCAL:
+        return ()  # pure B2 mode: never fall back to local frames
+    return (r"D:\ksrtc\frames_1s", str(ROOT / "static" / "sample_frames"))
+
+FRAME_DIR = next((p for p in _candidate_dirs() if p and os.path.isdir(p)), "")
 VIDEO_PATH = os.environ.get("VIDEO_PATH", r"D:\ksrtc\VID_20260819_135332150.mp4")
 CLIP_DIR = ROOT / "static" / "clips"
 DB_NAME = "WPM"
@@ -88,12 +93,15 @@ b2 = B2Module(_B2_CACHE)
 _LAST_FRAME_N = 3951  # number of 1s frames extracted for this video
 
 
-def resolve_frame_dir(override="", need_frames=None):
+def resolve_frame_dir(override="", need_frames=None, strict=False):
     """Pick a usable frame directory for the ML options.
 
     Priority: explicit form override -> local FRAME_DIR (only if it holds a
     real frame set) -> materialise (need_frames or all) from Backblaze B2 ->
     bundled sample_frames (hosted demos). Returns "" when nothing is usable.
+    When strict, a failing B2 materialisation re-raises instead of falling
+    back to the bundled samples, so the real reason (e.g. download cap)
+    reaches the job result.
     """
     if override and _real_frame_dir(override):
         return override
@@ -104,6 +112,8 @@ def resolve_frame_dir(override="", need_frames=None):
             return b2.materialize_frames(need_frames or _LAST_FRAME_N)
         except Exception as e:
             print(f"[wpm] B2 frame materialisation failed: {e}")
+            if strict or not (ROOT / "static" / "sample_frames").is_dir():
+                raise RuntimeError(f"B2 frame materialisation failed: {e}")
     bundled = ROOT / "static" / "sample_frames"
     if bundled.is_dir():
         return str(bundled)
@@ -502,7 +512,7 @@ def ml_retrain():
 
 def _do_retrain(override):
     from modules import b2_module
-    frame_dir = resolve_frame_dir(override)
+    frame_dir = resolve_frame_dir(override, strict=True)
     if not frame_dir or not _real_frame_dir(frame_dir):
         raise RuntimeError("no full frame set to train on: set FRAME_DIR or B2_KEY_ID/B2_APPLICATION_KEY")
     # labels come from the bundled Phase-I event log (start/end/activity)
@@ -543,7 +553,7 @@ def ml_predict_full():
 
 def _do_predict_full(override, max_frames, auto_log):
     from modules import b2_module
-    frame_dir = resolve_frame_dir(override)
+    frame_dir = resolve_frame_dir(override, strict=True)
     if not frame_dir or not _real_frame_dir(frame_dir):
         raise RuntimeError("no full frame set to predict: set FRAME_DIR or B2_KEY_ID/B2_APPLICATION_KEY")
     secs, preds = automation.predict_frames(frame_dir, MODEL_PATH,
