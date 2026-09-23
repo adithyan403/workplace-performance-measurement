@@ -10,7 +10,7 @@ Flask application exposing the five WPM modules to a colorful dashboard:
 
 Deploy target: Render (gunicorn). MongoDB URI read from env MONGO_URI.
 """
-import csv, json, math, os, io, base64
+import csv, json, math, os, io, base64, time
 from pathlib import Path
 
 import numpy as np
@@ -91,34 +91,63 @@ def resolve_frame_dir(override=""):
     return ""
 
 # ---------------------------------------------------------------- helpers -- #
-# simple background job registry (in-memory; per-process)
+# background job registry, persisted to .jobs/ so entries survive dev-reloader
+# restarts and gunicorn multi-worker setups (shared via the filesystem)
 import threading as _threading
-_JOBS = {}
 _JOBS_LOCK = _threading.Lock()
+_JOBS_DIR = ROOT / ".jobs"
+_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+_TRUE = ("true", "1", "yes")
+
+def _job_path(jid):
+    return _JOBS_DIR / f"{jid}.json"
+
+def _job_save(job):
+    tmp = _job_path(job["id"]).with_suffix(".tmp")
+    tmp.write_text(json.dumps(job), encoding="utf-8")
+    tmp.replace(_job_path(job["id"]))
 
 def start_job(kind, fn, *args, **kwargs):
     jid = f"{kind}-{os.urandom(3).hex()}"
-    with _JOBS_LOCK:
-        _JOBS[jid] = {"id": jid, "kind": kind, "status": "running",
-                      "progress": 0, "message": "started", "result": None, "error": None}
+    job = {"id": jid, "kind": kind, "status": "running",
+           "progress": 0, "message": "started", "result": None, "error": None}
+    _job_save(job)
     def _run():
         try:
             res = fn(*args, **kwargs)
-            with _JOBS_LOCK:
-                _JOBS[jid]["status"] = "done"
-                _JOBS[jid]["progress"] = 100
-                _JOBS[jid]["result"] = res
+            job["status"] = "done"
+            job["progress"] = 100
+            job["result"] = res
+            _job_save(job)
         except Exception as e:
-            with _JOBS_LOCK:
-                _JOBS[jid]["status"] = "error"
-                _JOBS[jid]["error"] = str(e)
+            job["status"] = "error"
+            job["error"] = str(e)
+            _job_save(job)
     t = _threading.Thread(target=_run, daemon=True)
     t.start()
     return jid
 
 def get_job(jid):
+    if os.sep in jid or "/" in jid or ".." in jid:
+        return None  # don't let a jid escape .jobs/
+    p = _job_path(jid)
+    if not p.exists():
+        return None
     with _JOBS_LOCK:
-        return _JOBS.get(jid)
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+def prune_jobs(max_age_hours=24):
+    """Delete old finished jobs so .jobs/ doesn't grow forever."""
+    cutoff = time.time() - max_age_hours * 3600
+    for p in _JOBS_DIR.glob("*.json"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            pass
 
 def get_mongo():
     if not (_MONGO and MONGO_URI):
@@ -514,4 +543,4 @@ def health():
 # ------------------------------------------------------------------ main -- #
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)

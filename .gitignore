@@ -20,6 +20,9 @@ Thumbs.db
 static/clips/
 static/b2cache/
 
+# background job bookkeeping
+.jobs/
+
 # secrets — never commit the DB URI
 .env
 *.env
