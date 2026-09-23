@@ -76,17 +76,23 @@ CLIP_DIR = ROOT / "static" / "clips"
 
 # --------------------------------------------------------------------------- #
 # Backblaze B2 asset store (frames + clips)                                   #
+#   Prefer Render's persistent disk (/data) so the frames.zip + clips download #
+#   once and survive deploys, instead of re-fetching on every boot.           #
 # --------------------------------------------------------------------------- #
-b2 = B2Module(ROOT / "static" / "b2cache")
+if os.path.isdir("/data") and os.access("/data", os.W_OK):
+    _B2_CACHE = Path("/data") / "b2cache"
+else:
+    _B2_CACHE = ROOT / "static" / "b2cache"
+b2 = B2Module(_B2_CACHE)
 
 _LAST_FRAME_N = 3951  # number of 1s frames extracted for this video
 
 
-def resolve_frame_dir(override=""):
+def resolve_frame_dir(override="", need_frames=None):
     """Pick a usable frame directory for the ML options.
 
     Priority: explicit form override -> local FRAME_DIR (only if it holds a
-    real frame set) -> materialise all 3951 frames from Backblaze B2 ->
+    real frame set) -> materialise (need_frames or all) from Backblaze B2 ->
     bundled sample_frames (hosted demos). Returns "" when nothing is usable.
     """
     if override and _real_frame_dir(override):
@@ -95,7 +101,7 @@ def resolve_frame_dir(override=""):
         return FRAME_DIR
     if b2.enabled:
         try:
-            return b2.materialize_frames(_LAST_FRAME_N)
+            return b2.materialize_frames(need_frames or _LAST_FRAME_N)
         except Exception as e:
             print(f"[wpm] B2 frame materialisation failed: {e}")
     bundled = ROOT / "static" / "sample_frames"
@@ -301,15 +307,21 @@ def ml_predict():
     """Prediction demo: needs FRAME_DIR with f_XXXX.jpg frames, or accept a
     frame-dir override via form. Predicts, builds events, auto-logs to Mongo,
     computes VA/NVA and returns everything as JSON for the charts."""
-    frame_dir = resolve_frame_dir(request.form.get("frame_dir", ""))
-    if not frame_dir or not os.path.isdir(frame_dir):
+    n = 0
+    try:
+        n = int(request.form.get("max_frames", 0))  # 0 = all
+    except (TypeError, ValueError):
+        n = 0
+    need = n if n > 0 else None
+    frame_dir = resolve_frame_dir(request.form.get("frame_dir", ""),
+                                  need_frames=need)
+    if not frame_dir or not _real_frame_dir(frame_dir):
         return jsonify({"ok": False, "error":
                         "No full frame set available. Set FRAME_DIR or B2_KEY_ID/"
                         "B2_APPLICATION_KEY (Backblaze B2) for the ML options."}), 400
     if not MODEL_PATH.exists():
         return jsonify({"ok": False, "error": "model not trained yet."}), 400
     try:
-        n = int(request.form.get("max_frames", 0))  # 0 = all
         secs, preds = automation.predict_frames(frame_dir, MODEL_PATH, start_sec=0,
                                                 max_frames=n or None)
         events = automation.predictions_to_events(secs, preds)
@@ -478,17 +490,21 @@ def job_status(jid):
 @app.route("/ml/retrain", methods=["POST"])
 def ml_retrain():
     """Background retrain of the ML model from the labelled frames.
-    Frames resolve via local FRAME_DIR or are pulled from Backblaze B2."""
-    frame_dir = resolve_frame_dir(request.form.get("frame_dir", ""))
-
-    if not frame_dir or not os.path.isdir(frame_dir) or not _real_frame_dir(frame_dir):
+    Frame sourcing (local FRAME_DIR or B2 materialisation) runs inside the
+    job thread so the browser always gets a job id immediately."""
+    override = request.form.get("frame_dir", "")
+    if not _real_frame_dir(FRAME_DIR) and not b2.enabled:
         return jsonify({"ok": False, "error":
-                        "Could not find a full frame set to train on. Set "
-                        "FRAME_DIR to the 1s frame folder or set B2_KEY_ID/B2_APPLICATION_KEY."}), 400
-    jid = start_job("retrain", _do_retrain, frame_dir)
+                        "No full frame set available. Set FRAME_DIR or "
+                        "B2_KEY_ID/B2_APPLICATION_KEY (Backblaze B2)."}), 400
+    jid = start_job("retrain", _do_retrain, override)
     return jsonify({"ok": True, "job": jid})
 
-def _do_retrain(frame_dir):
+def _do_retrain(override):
+    from modules import b2_module
+    frame_dir = resolve_frame_dir(override)
+    if not frame_dir or not _real_frame_dir(frame_dir):
+        raise RuntimeError("no full frame set to train on: set FRAME_DIR or B2_KEY_ID/B2_APPLICATION_KEY")
     # labels come from the bundled Phase-I event log (start/end/activity)
     ev_sample = ROOT / "data" / "event_log_sample.json"
     locate_label = {}
@@ -510,22 +526,26 @@ def _do_retrain(frame_dir):
 @app.route("/ml/predict-full", methods=["POST"])
 def ml_predict_full():
     """Background re-prediction of the whole video + auto-log to Mongo.
-    Frames resolve via local FRAME_DIR or are pulled from Backblaze B2."""
-    frame_dir = resolve_frame_dir(request.form.get("frame_dir", ""))
-
-    if not frame_dir or not os.path.isdir(frame_dir) or not _real_frame_dir(frame_dir):
+    Frame sourcing (local FRAME_DIR or B2 materialisation) runs inside the
+    job thread so the browser always gets a job id immediately."""
+    override = request.form.get("frame_dir", "")
+    if not _real_frame_dir(FRAME_DIR) and not b2.enabled:
         return jsonify({"ok": False, "error":
-                        "Could not find a full frame set to predict. Set "
-                        "FRAME_DIR to the 1s frame folder or set B2_KEY_ID/B2_APPLICATION_KEY."}), 400
+                        "No full frame set available. Set FRAME_DIR or "
+                        "B2_KEY_ID/B2_APPLICATION_KEY (Backblaze B2)."}), 400
     if not MODEL_PATH.exists():
         return jsonify({"ok": False, "error": "model not trained yet."}), 400
     max_frames = int(request.form.get("max_frames", 0) or 0)
     auto_log = request.form.get("auto_log", "1") == "1"
-    jid = start_job("predict_full", _do_predict_full, frame_dir,
-                    max_frames or None, auto_log)
+    jid = start_job("predict_full", _do_predict_full,
+                    override, max_frames or None, auto_log)
     return jsonify({"ok": True, "job": jid})
 
-def _do_predict_full(frame_dir, max_frames, auto_log):
+def _do_predict_full(override, max_frames, auto_log):
+    from modules import b2_module
+    frame_dir = resolve_frame_dir(override)
+    if not frame_dir or not _real_frame_dir(frame_dir):
+        raise RuntimeError("no full frame set to predict: set FRAME_DIR or B2_KEY_ID/B2_APPLICATION_KEY")
     secs, preds = automation.predict_frames(frame_dir, MODEL_PATH,
                                             start_sec=0, max_frames=max_frames)
     events = automation.predictions_to_events(secs, preds)

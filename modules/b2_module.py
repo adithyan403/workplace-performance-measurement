@@ -20,6 +20,13 @@ def available():
     return bool(os.environ.get("B2_KEY_ID") and os.environ.get("B2_APPLICATION_KEY"))
 
 
+def _extract_zip(zip_local, frames_dir, log=print):
+    import zipfile
+    with zipfile.ZipFile(zip_local) as z:
+        z.extractall(frames_dir)
+    log(f"[b2.frames] extracted from zip: {len(list(frames_dir.glob('f_*.jpg')))} frames")
+
+
 class B2Module:
     def __init__(self, cache_dir):
         self.cache_dir = Path(cache_dir)
@@ -53,7 +60,7 @@ class B2Module:
     # ------------------------------------------------------------------ #
     # small object in / out: streams into a local cache file             #
     # ------------------------------------------------------------------ #
-    def download(self, key, refresh=False):
+    def download(self, key, refresh=False, raise_on_error=False):
         """Fetch key from B2 into cache_dir; return local path (or None)."""
         bucket = self._connect()
         dest = self.cache_dir / Path(key).name
@@ -62,7 +69,9 @@ class B2Module:
         tmp = dest.with_suffix(dest.suffix + ".part")
         try:
             bucket.download_file_by_name(key).save_to(str(tmp))
-        except Exception:
+        except Exception as e:
+            if raise_on_error:
+                raise RuntimeError(f"B2 download failed for {key}: {e}")
             return None
         tmp.replace(dest)
         return str(dest)
@@ -107,15 +116,46 @@ class B2Module:
     # frame directory materialisation: pull f_XXXX.jpg frames from B2     #
     # into a local folder so automation/training can read them like the   #
     # original FRAME_DIR.                                                 #
+    #                                                                     #
+    # Prefers a single frames/frames.zip payload (1 download transaction   #
+    # -> 1 frame = 1 Class-B transaction otherwise, which blows the B2    #
+    # free-tier download cap). Falls back to per-frame downloads only if  #
+    # the zip is not present.                                             #
     # ------------------------------------------------------------------ #
     def materialize_frames(self, num_frames=3951, max_workers=16, force=False):
-        """Download existing frames 1..num_frames from B2 into
-        <cache_dir>/frames/ (named f_0001.jpg ...). Returns the folder path."""
-        from concurrent.futures import ThreadPoolExecutor
+        """Download frames 1..num_frames from B2 into <cache_dir>/frames/
+        (named f_0001.jpg ...). Returns the folder path."""
         frames_dir = self.cache_dir / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
         if not self.enabled:
             return str(frames_dir)
+
+        zip_local = self.cache_dir / "frames.zip"
+        have_local = zip_local.exists() and zip_local.stat().st_size > 0
+        zip_key = "frames/frames.zip"
+        if have_local:
+            _extract_zip(zip_local, frames_dir, print)
+            return str(frames_dir)
+        # Prefer the single zip payload. Only fall back to per-frame files
+        # when the zip genuinely does not exist (NotFoundError); any other
+        # failure (e.g. daily download cap exhausted) is re-raised so the
+        # caller sees the real reason instead of silently failing per-frame.
+        try:
+            got = self.download(zip_key, refresh=True, raise_on_error=True)
+        except RuntimeError as e:
+            if "not found" in str(e).lower() or "does not exist" in str(e).lower() \
+               or "bad_file_id" in str(e).lower() or "404" in str(e):
+                pass  # zip not uploaded -> per-frame fallback below
+            else:
+                raise
+        else:
+            if got:
+                _extract_zip(zip_local, frames_dir, print)
+                return str(frames_dir)
+
+        # per-frame fallback (expensive: N Class-B transactions)
+        from concurrent.futures import ThreadPoolExecutor
+        bucket = self._connect()
         todo = []
         for i in range(1, num_frames + 1):
             dest = frames_dir / f"f_{i:04d}.jpg"
@@ -124,7 +164,6 @@ class B2Module:
             todo.append((f"frames/f_{i:04d}.jpg", str(dest)))
         if not todo:
             return str(frames_dir)
-        bucket = self._connect()
         lock = threading.Lock()
         ok, fail = 0, 0
 
