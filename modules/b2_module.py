@@ -102,3 +102,49 @@ class B2Module:
             cc[prefix] = (now, keys)
             self._list_cache = cc
         return keys
+
+    # ------------------------------------------------------------------ #
+    # frame directory materialisation: pull f_XXXX.jpg frames from B2     #
+    # into a local folder so automation/training can read them like the   #
+    # original FRAME_DIR.                                                 #
+    # ------------------------------------------------------------------ #
+    def materialize_frames(self, num_frames=3951, max_workers=16, force=False):
+        """Download existing frames 1..num_frames from B2 into
+        <cache_dir>/frames/ (named f_0001.jpg ...). Returns the folder path."""
+        from concurrent.futures import ThreadPoolExecutor
+        frames_dir = self.cache_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        if not self.enabled:
+            return str(frames_dir)
+        todo = []
+        for i in range(1, num_frames + 1):
+            dest = frames_dir / f"f_{i:04d}.jpg"
+            if dest.exists() and dest.stat().st_size > 0 and not force:
+                continue
+            todo.append((f"frames/f_{i:04d}.jpg", str(dest)))
+        if not todo:
+            return str(frames_dir)
+        bucket = self._connect()
+        lock = threading.Lock()
+        ok, fail = 0, 0
+
+        def _one(kp):
+            nonlocal ok, fail
+            key, dest = kp
+            tmp = dest + ".part"
+            try:
+                bucket.download_file_by_name(key).save_to(tmp)
+                import os as _os
+                _os.replace(tmp, dest)
+                with lock:
+                    ok += 1
+                    if ok % 500 == 0:
+                        print(f"[b2.frames] {ok}/{len(todo)} materialised")
+            except Exception:
+                with lock:
+                    fail += 1
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            list(ex.map(_one, todo))
+        print(f"[b2.frames] done: downloaded={ok} failed={fail} total_frames={num_frames}")
+        return str(frames_dir)

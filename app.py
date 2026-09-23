@@ -66,6 +66,30 @@ CLIP_DIR = ROOT / "static" / "clips"
 # --------------------------------------------------------------------------- #
 b2 = B2Module(ROOT / "static" / "b2cache")
 
+_LAST_FRAME_N = 3951  # number of 1s frames extracted for this video
+
+
+def resolve_frame_dir(override=""):
+    """Pick a usable frame directory for the ML options.
+
+    Priority: explicit form override -> local FRAME_DIR -> materialise all
+    3951 frames from Backblaze B2 -> bundled sample_frames (hosted demos).
+    Returns "" when nothing is available.
+    """
+    if override and os.path.isdir(override):
+        return override
+    if FRAME_DIR and os.path.isdir(FRAME_DIR):
+        return FRAME_DIR
+    if b2.enabled:
+        try:
+            return b2.materialize_frames(_LAST_FRAME_N)
+        except Exception as e:
+            print(f"[wpm] B2 frame materialisation failed: {e}")
+    bundled = ROOT / "static" / "sample_frames"
+    if bundled.is_dir():
+        return str(bundled)
+    return ""
+
 # ---------------------------------------------------------------- helpers -- #
 # simple background job registry (in-memory; per-process)
 import threading as _threading
@@ -235,15 +259,10 @@ def ml_predict():
     """Prediction demo: needs FRAME_DIR with f_XXXX.jpg frames, or accept a
     frame-dir override via form. Predicts, builds events, auto-logs to Mongo,
     computes VA/NVA and returns everything as JSON for the charts."""
-    frame_dir = request.form.get("frame_dir", "") or FRAME_DIR
-    # fallback to bundled sample frames so ML works on hosted Render
-    if not frame_dir or not os.path.isdir(frame_dir):
-        bundled = ROOT / "static" / "sample_frames"
-        if bundled.is_dir():
-            frame_dir = str(bundled)
+    frame_dir = resolve_frame_dir(request.form.get("frame_dir", ""))
     if not frame_dir or not os.path.isdir(frame_dir):
         return jsonify({"ok": False, "error":
-                        "FRAME_DIR not set / invalid on this host. Provide frame_dir."}), 400
+                        "No frame source (local FRAME_DIR, B2 or bundled samples)."}), 400
     if not MODEL_PATH.exists():
         return jsonify({"ok": False, "error": "model not trained yet."}), 400
     try:
@@ -415,11 +434,13 @@ def job_status(jid):
 
 @app.route("/ml/retrain", methods=["POST"])
 def ml_retrain():
-    """Background retrain of the ML model from the labelled frames."""
-    frame_dir = request.form.get("frame_dir", "") or FRAME_DIR
+    """Background retrain of the ML model from the labelled frames.
+    Frames resolve via local FRAME_DIR or are pulled from Backblaze B2."""
+    frame_dir = resolve_frame_dir(request.form.get("frame_dir", ""))
+
     if not frame_dir or not os.path.isdir(frame_dir):
         return jsonify({"ok": False, "error":
-                        "FRAME_DIR not set on this host; provide frame_dir."}), 400
+                        "No frame source (local FRAME_DIR or B2) to train on."}), 400
     jid = start_job("retrain", _do_retrain, frame_dir)
     return jsonify({"ok": True, "job": jid})
 
@@ -444,11 +465,13 @@ def _do_retrain(frame_dir):
 
 @app.route("/ml/predict-full", methods=["POST"])
 def ml_predict_full():
-    """Background re-prediction of the whole video + auto-log to Mongo."""
-    frame_dir = request.form.get("frame_dir", "") or FRAME_DIR
+    """Background re-prediction of the whole video + auto-log to Mongo.
+    Frames resolve via local FRAME_DIR or are pulled from Backblaze B2."""
+    frame_dir = resolve_frame_dir(request.form.get("frame_dir", ""))
+
     if not frame_dir or not os.path.isdir(frame_dir):
         return jsonify({"ok": False, "error":
-                        "FRAME_DIR not set on this host; provide frame_dir."}), 400
+                        "No frame source (local FRAME_DIR or B2) to predict."}), 400
     if not MODEL_PATH.exists():
         return jsonify({"ok": False, "error": "model not trained yet."}), 400
     max_frames = int(request.form.get("max_frames", 0) or 0)

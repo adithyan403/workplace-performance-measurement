@@ -36,12 +36,34 @@ modules/
 ```powershell
 $env:PYTHONPATH="D:\pylib"
 $env:MONGO_URI="mongodb+srv://USER:PASS@cluster0.xxx.mongodb.net/?appName=Cluster0"
-$env:FRAME_DIR="D:\ksrtc\frames_1s"     # optional; falls back to static/sample_frames
+$env:B2_KEY_ID="your_b2_keyId"
+$env:B2_APPLICATION_KEY="your_b2_applicationKey"
+$env:FRAME_DIR="D:\ksrtc\frames_1s"     # optional
 D:\python.exe app.py                    # http://127.0.0.1:5000
 ```
 
 If `MONGO_URI` is absent the dashboard/analysis fall back to the bundled
 `data/event_log_sample.json` (1697 Phase-I events).
+
+## Backblaze B2 asset store
+
+The app can stream everything from Backblaze B2, so a 23 GB video never has
+to ship. Bucket layout mirrors local disk:
+
+```
+frames/f_0001.jpg ... f_3951.jpg     # 1 Hz frames
+clips/clip_0_2.mp4 ...               # one clip per duty event (960px, <=30 s)
+```
+
+Set `B2_KEY_ID` / `B2_APPLICATION_KEY` (and optionally `B2_BUCKET`, default
+`ksrtc-wpm-assets`) and the resolution order for every asset becomes:
+
+**Web clips & frames** (`/clip/...`, `/frame/...`):  local cache → **B2** → ffmpeg cut.
+
+**ML options** (retrain, whole-video re-predict, live predict): form override
+→ local `FRAME_DIR` → **materialise all 3951 frames from B2 into a local
+cache** → bundled `static/sample_frames/`. So all ML buttons work even when no
+frames exist on the host.
 
 ## Re-train the ML model (from local frames + Phase-I event log)
 
@@ -59,6 +81,7 @@ Re-run `scripts\prepare_static_data.py` to refresh the dashboard JSON files.
 3. Set env vars:
    - `MONGO_URI` → your Atlas connection string
    - `SECRET_KEY` → random string
+   - `B2_KEY_ID` / `B2_APPLICATION_KEY` → Backblaze B2 (frames + clips, optional but recommended)
    - `FRAME_DIR` → (optional) `static/sample_frames` for demo predictions
 4. Build command: `pip install -r requirements.txt`
 5. Start command: `gunicorn app:app --workers 2 --threads 4 --timeout 300 --bind 0.0.0.0:$PORT`
