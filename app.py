@@ -459,7 +459,7 @@ def job_status(jid):
     j = get_job(jid)
     if j is None:
         return jsonify({"ok": False, "error": "unknown job"}), 404
-    return jsonify(j)
+    return jsonify({"ok": True, **j})
 
 @app.route("/ml/retrain", methods=["POST"])
 def ml_retrain():
