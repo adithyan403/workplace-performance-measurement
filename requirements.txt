@@ -8,3 +8,11 @@ pandas>=2.0
 matplotlib>=3.8
 gunicorn>=21.2
 b2sdk>=2.0
+
+# --- CNN deep-learning stack (used by the /ml/cnn upload page) ---
+# CPU-only wheels to keep the free Render build lean (~190 MB vs ~2 GB CUDA).
+# Root cause of "PyTorch is not installed": torch was only in requirements-cnn.txt.
+--extra-index-url https://download.pytorch.org/whl/cpu
+Pillow>=10.0
+torch>=2.2
+torchvision>=0.17
