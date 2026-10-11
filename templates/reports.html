@@ -45,7 +45,7 @@ document.getElementById('btnGen').addEventListener('click', async () => {
   st.innerHTML = '<div class="spinner-border spinner-border-sm text-info"></div> generating…';
   try {
     const r = await fetch('{{ url_for("reports_generate") }}', {method:'POST'});
-    const j = await r.json();
+    const j = await wpmJson(r);
     if (j.ok) { st.innerHTML = `<div class="alert alert-success p-2" style="font-size:.85rem">Report ready (${(j.size/1024).toFixed(0)} KB). <a href="${location.pathname.replace('/reports','')}/reports/download">Download</a></div>`; }
     else st.innerHTML = `<div class="alert alert-warning p-2" style="font-size:.85rem">${j.error}</div>`;
   } catch (e) { st.innerHTML = `<div class="alert alert-danger p-2">${e}</div>`; }

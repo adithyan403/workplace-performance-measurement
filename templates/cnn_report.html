@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}CNN Report{% endblock %}
+{% block heading %}CNN Analysis Report{% endblock %}
+
+{% block content %}
+<ul class="nav nav-tabs mb-3" style="border-color:var(--line)">
+  <li class="nav-item">
+    <a class="nav-link" href="{{ url_for('ml_cnn_view') }}" style="color:var(--muted)"><i class="bi bi-cloud-upload"></i> Detection</a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link active" href="{{ url_for('ml_cnn_report_view') }}" style="background:rgba(34,211,238,.12);color:var(--ink);border-color:var(--line) var(--line) transparent"><i class="bi bi-file-earmark-pdf"></i> Report</a>
+  </li>
+</ul>
+
+{% if analysis and analysis.events %}
+{% set va = analysis.va_nva or {} %}
+<div class="kpi">
+  <div class="box card-wpm" style="--glow:rgba(168,85,247,.22)">
+    <div class="num" style="color:#c4b5fd">{{ analysis.total }}</div>
+    <div class="lbl">Frames Predicted</div>
+    <div class="mini">{{ analysis.session or 'full-video run' }}</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(250,204,21,.18)">
+    <div class="num" style="color:#fde047">{{ analysis.events | length }}</div>
+    <div class="lbl">Duty Events</div>
+    <div class="mini">run-length intervals</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(34,197,94,.18)">
+    <div class="num" style="color:#16a34a">{{ va.VA.pct if va else '—' }}%</div>
+    <div class="lbl">Value-Added</div>
+    <div class="mini">{{ va.VA.sec if va else 0 }} s writing</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(239,68,68,.18)">
+    <div class="num" style="color:#dc2626">{{ va.NVA.pct if va else '—' }}%</div>
+    <div class="lbl">Non-Value-Added</div>
+    <div class="mini">{{ va.NVA.sec if va else 0 }} s wasted</div>
+  </div>
+</div>
+
+<div class="card-wpm mb-3">
+  <div class="card-title"><i class="bi bi-file-earmark-bar-graph"></i> Generate &amp; Download Analysis Report</div>
+  <p class="text-muted" style="font-size:.85rem">
+    Builds a multi-page PDF of the current CNN prediction run (session
+    <code class="kbd">{{ analysis.session or 'full-video run' }}</code>): KPI summary, activity donut,
+    VA/NVA split, prediction timeline, confusion-matrix / per-class metrics and the detected event log.
+  </p>
+  <div class="d-flex gap-2 flex-wrap align-items-center">
+    <button class="btn btn-grad" id="btnGenReport"><i class="bi bi-file-earmark-arrow-down"></i> Generate Report</button>
+    <a class="btn btn-ghost {{ '' if report_exists else 'disabled' }}" id="btnDlReport"
+       href="{{ url_for('ml_cnn_report_download') }}"><i class="bi bi-download"></i> Download PDF</a>
+    <span class="btn btn-ghost disabled" id="repBadge" style="min-width:260px">
+      <i class="bi bi-hourglass-split"></i> <span id="repText">{{ 'report ready' if report_exists else 'not generated' }}</span>
+    </span>
+  </div>
+  <div id="repResult" class="mt-3"></div>
+</div>
+
+<div class="grid2">
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-pie-chart"></i> Class Distribution</div>
+    <div style="height:280px"><canvas id="repDonut"></canvas></div>
+  </div>
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-bezier2"></i> Value vs Non-Value Time</div>
+    <div style="height:280px"><canvas id="repVA"></canvas></div>
+  </div>
+</div>
+
+{% if cnn_report and cnn_report.confusion_matrix %}
+<div class="card-wpm">
+  <div class="card-title"><i class="bi bi-grid-3x3-gap"></i> Model Performance <span class="text-muted" style="font-size:.7rem">test accuracy {{ (cnn_report.test_accuracy * 100) | round(1) }}% · {{ cnn_report.test_frames }} hold-out frames</span></div>
+  <div class="scroll-x">
+    <table class="table table-wpm">
+      <thead><tr><th>Class</th><th>Test #</th><th>Precision</th><th>Recall</th></tr></thead>
+      <tbody>
+      {% for c in cnn_report.classes %}
+        <tr>
+          <td><span class="badge-act" style="background:{{ classes_colors[c] }}22;color:{{ classes_colors[c] }};border:1px solid {{ classes_colors[c] }}55">{{ c }}</span></td>
+          <td>{{ cnn_report.per_class[c]['test_support'] }}</td>
+          <td>{{ cnn_report.per_class[c]['precision'] | round(3) }}</td>
+          <td>{{ cnn_report.per_class[c]['recall'] | round(3) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% else %}
+<div class="alert alert-warning d-flex align-items-center gap-2" style="font-size:.85rem">
+  <i class="bi bi-gpu-card"></i>
+  <span>No CNN prediction analysis available yet. Run a detection on the
+    <a href="{{ url_for('ml_cnn_view') }}" style="text-decoration:underline">Detection tab</a> first.</span>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('btnGenReport')?.addEventListener('click', async () => {
+  const res = document.getElementById('repResult');
+  const badge = document.getElementById('repText');
+  badge.textContent = 'generating…';
+  res.innerHTML = '<div class="spinner-border spinner-border-sm text-info"></div> building PDF report…';
+  try {
+    const r = await fetch('{{ url_for("ml_cnn_report_generate") }}', { method:'POST' });
+    const j = await wpmJson(r);
+    if (!j.ok) { res.innerHTML = `<div class="alert alert-danger p-2" style="font-size:.85rem">${j.error}</div>`; badge.textContent='error'; return; }
+    badge.textContent = 'report ready';
+    document.getElementById('btnDlReport')?.classList.remove('disabled');
+    res.innerHTML = `<div class="alert alert-success p-2" style="font-size:.85rem">
+      Report generated (${(j.size/1024).toFixed(0)} KB).
+      <a href="{{ url_for('ml_cnn_report_download') }}" style="text-decoration:underline">Download WPM_CNN_Analysis_Report.pdf →</a></div>`;
+  } catch (e) {
+    res.innerHTML = `<div class="alert alert-danger p-2" style="font-size:.85rem">${e}</div>`;
+  }
+});
+{% if analysis and analysis.events %}
+{% set ch = cnn_chart %}
+const CNNR = { labels: {{ ch.labels | tojson }}, colors: {{ ch.colors | tojson }},
+  sec: {{ ch.sec | tojson }}, pct: {{ ch.pct | tojson }} };
+new Chart(document.getElementById('repDonut'), {
+  type:'doughnut',
+  data:{ labels: CNNR.labels, datasets:[{ data: CNNR.sec, backgroundColor: CNNR.colors, borderColor:'#ffffff', borderWidth:2 }] },
+  options:{ responsive:true, maintainAspectRatio:false, cutout:'62%',
+    plugins:{ legend:{ position:'right', labels:{ color:'#334155', boxWidth:12, font:{size:11} } } } }
+});
+new Chart(document.getElementById('repVA'), {
+  type:'bar',
+  data:{ labels:['Value-Added','Non-Value-Added'],
+    datasets:[{ data:[{{ analysis.va_nva.VA.sec }}, {{ analysis.va_nva.NVA.sec }}], backgroundColor:['#22c55e','#ef4444'], borderRadius:10, barPercentage:0.5 }] },
+  options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false} },
+    scales:{ y:{ beginAtZero:true, ticks:{color:'#475569'}, grid:{color:'rgba(2,6,23,.06)'} },
+             x:{ ticks:{color:'#334155'}, grid:{display:false} } } }
+});
+{% endif %}
+</script>
+{% endblock %}

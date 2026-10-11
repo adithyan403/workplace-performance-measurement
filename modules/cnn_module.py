@@ -70,20 +70,26 @@ class CnnDetector:
             _transforms.Normalize(MEAN, STD),
         ])
 
-    def classify_paths(self, paths, batch_size=32):
-        """Return list of predicted class names, same order as paths."""
+    def classify_paths(self, paths, batch_size=32, on_progress=None):
+        """Return list of predicted class names, same order as paths.
+
+        on_progress(done, total) is called after each batch for live progress.
+        """
         torch, pil = _torch, _pil
         preds = []
         batch = []
+        total = len(paths)
         for i, p in enumerate(paths):
             img = pil.open(str(p)).convert("RGB")
             batch.append(self.tf(img).unsqueeze(0))
-            if len(batch) >= batch_size or i == len(paths) - 1:
+            if len(batch) >= batch_size or i == total - 1:
                 xb = torch.cat(batch, 0).to(self.device)
                 with torch.no_grad():
                     out = self.model(xb).argmax(1).cpu().numpy().tolist()
                 preds.extend(CLASSES[j] for j in out)
                 batch = []
+                if on_progress:
+                    on_progress(len(preds), total)
         return preds
 
     def classify_path(self, path):

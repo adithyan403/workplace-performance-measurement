@@ -3,10 +3,18 @@
 {% block heading %}CNN Deep-Learning Detection{% endblock %}
 
 {% block content %}
+<ul class="nav nav-tabs mb-3" style="border-color:var(--line)">
+  <li class="nav-item">
+    <a class="nav-link active" href="{{ url_for('ml_cnn_view') }}" style="background:rgba(34,211,238,.12);color:var(--ink);border-color:var(--line) var(--line) transparent"><i class="bi bi-cloud-upload"></i> Detection</a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link" href="{{ url_for('ml_cnn_report_view') }}" style="color:var(--muted)"><i class="bi bi-file-earmark-pdf"></i> Report</a>
+  </li>
+</ul>
 {% set report = cnn_report %}
 <div class="kpi">
   <div class="box card-wpm" style="--glow:rgba(168,85,247,.22)">
-    <div class="num" style="color:{{ '#4ade80' if cnn_ok else '#f87171' }}">{{ "ONLINE" if cnn_ok else "OFFLINE" }}</div>
+    <div class="num" style="color:{{ '#16a34a' if cnn_ok else '#dc2626' }}">{{ "ONLINE" if cnn_ok else "OFFLINE" }}</div>
     <div class="lbl">ResNet-18 Model</div>
     <div class="mini">{{ "cnn_resnet18.pt loaded" if cnn_ok else "train locally, ship to data/" }}</div>
   </div>
@@ -99,6 +107,7 @@
     ✓ Inference engine ready (PyTorch + ResNet-18).
     {% endif %}
   </p>
+  <div id="cnnProgress" class="mt-4" style="display:none"></div>
   <div id="cnnResult" class="mt-4"></div>
 </div>
 {% endblock %}
@@ -107,60 +116,133 @@
 <script>
 const COL = {{ classes_colors | tojson }};
 const VA_CLS = {{ va_classes | tojson }};
+const resEl = document.getElementById('cnnResult');
+const progEl = document.getElementById('cnnProgress');
+let pollTimer = null;
+
 function pill(a) {
   const c = COL[a] || '#94a3b8';
   return `<span class="badge-act" style="color:${c};border:1px solid ${c}55;background:${c}22">${a}</span>`;
 }
-document.getElementById('cnnForm').addEventListener('submit', async (ev) => {
-  ev.preventDefault();
-  const res = document.getElementById('cnnResult');
-  res.innerHTML = '<div class="spinner-border spinner-border-sm text-info"></div> running inference over uploaded frames…';
-  try {
-    const fd = new FormData(ev.target);
-    const r = await fetch('{{ url_for("ml_cnn_predict") }}', { method:'POST', body: fd });
-    const j = await r.json();
-    if (!j.ok) { res.innerHTML = `<div class="alert alert-danger">${j.error}</div>`; return; }
-    const v = j.va_nva, dist = j.distribution;
-    const distRows = Object.keys(dist).map(c =>
-      `<tr><td>${pill(c)}</td><td>${dist[c]} s</td><td>${(100*dist[c]/j.n_frames).toFixed(1)}%</td></tr>`).join('');
-    res.innerHTML = `
-      <div class="alert alert-success p-2" style="font-size:.85rem">
-        <b>${j.n_frames}</b> frames predicted → <b>${j.events.length}</b> duty events ·
-        VA <b class="text-success">${v.VA.pct}%</b> (${v.VA.sec}s) · NVA <b class="text-danger">${v.NVA.pct}%</b> (${v.NVA.sec}s)
+function fmtBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
+  if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+  return (b / 1073741824).toFixed(2) + ' GB';
+}
+function showProgress(phase, pct) {
+  progEl.style.display = '';
+  progEl.innerHTML = `
+    <div class="card-wpm">
+      <div class="d-flex justify-content-between align-items-center mb-2" style="font-size:.82rem">
+        <span id="cnnPhase" class="text-muted"></span>
+        <span id="cnnPct" style="font-weight:700"></span>
       </div>
-      <div class="grid2">
-        <div class="card-wpm">
-          <div class="card-title"><i class="bi bi-bar-chart-fill"></i> Class Distribution</div>
-          <div class="scroll-x"><table class="table table-wpm">
-            <thead><tr><th>Activity</th><th>Seconds</th><th>Share</th></tr></thead>
-            <tbody>${distRows}</tbody>
-          </table></div>
-        </div>
-        <div class="card-wpm">
-          <div class="card-title"><i class="bi bi-bezier2"></i> Event Timeline</div>
-          <div class="scroll-x" style="max-height:320px;overflow-y:auto"><table class="table table-wpm">
-            <thead><tr><th>#</th><th>Start</th><th>End</th><th>Sec</th><th>Activity</th><th>Type</th></tr></thead>
-            <tbody>
-            ${j.events.slice(0,80).map((e,i)=>`
-              <tr><td class="text-muted">${i+1}</td><td>${e.start}</td><td>${e.end}</td><td>${e.duration}</td>
-              <td>${pill(e.activity)}</td>
-              <td>${VA_CLS.includes(e.activity) ? '<span class="badge badge-va">VA</span>' : '<span class="badge badge-nva">NVA</span>'}</td></tr>`).join('')}
-            </tbody>
-          </table></div>
-        </div>
+      <div class="progress" role="progressbar" style="height:12px;background:rgba(2,6,23,.08)">
+        <div id="cnnBar" class="progress-bar progress-bar-striped progress-bar-animated"
+             style="width:0%;background:linear-gradient(90deg,#06b6d4,#6366f1)"></div>
+      </div>
+    </div>`;
+  setProgress(phase, pct || 0);
+}
+function setProgress(phase, pct) {
+  const p = Math.max(0, Math.min(100, pct || 0));
+  const bar = document.getElementById('cnnBar');
+  const ph = document.getElementById('cnnPhase');
+  const pc = document.getElementById('cnnPct');
+  if (bar) bar.style.width = p + '%';
+  if (ph && phase) ph.textContent = phase;
+  if (pc) pc.textContent = p.toFixed(0) + '%';
+}
+function showError(msg) {
+  progEl.style.display = 'none';
+  resEl.innerHTML = `<div class="alert alert-danger">${msg}</div>`;
+}
+function renderResult(j) {
+  const v = j.va_nva, dist = j.distribution;
+  const distRows = Object.keys(dist).map(c =>
+    `<tr><td>${pill(c)}</td><td>${dist[c]} s</td><td>${(100 * dist[c] / j.n_frames).toFixed(1)}%</td></tr>`).join('');
+  resEl.innerHTML = `
+    <div class="alert alert-success p-2" style="font-size:.85rem">
+      <b>${j.n_frames}</b> frames predicted → <b>${j.events.length}</b> duty events ·
+      VA <b class="text-success">${v.VA.pct}%</b> (${v.VA.sec}s) · NVA <b class="text-danger">${v.NVA.pct}%</b> (${v.NVA.sec}s)
+    </div>
+    <div class="grid2">
+      <div class="card-wpm">
+        <div class="card-title"><i class="bi bi-bar-chart-fill"></i> Class Distribution</div>
+        <div class="scroll-x"><table class="table table-wpm">
+          <thead><tr><th>Activity</th><th>Seconds</th><th>Share</th></tr></thead>
+          <tbody>${distRows}</tbody>
+        </table></div>
       </div>
       <div class="card-wpm">
-        <div class="card-title"><i class="bi bi-card-image"></i> Per-Frame Predictions</div>
-        <div class="scroll-x" style="max-height:420px;overflow-y:auto"><table class="table table-wpm">
-          <thead><tr><th>#</th><th>File</th><th>Prediction</th></tr></thead>
+        <div class="card-title"><i class="bi bi-bezier2"></i> Event Timeline</div>
+        <div class="scroll-x" style="max-height:320px;overflow-y:auto"><table class="table table-wpm">
+          <thead><tr><th>#</th><th>Start</th><th>End</th><th>Sec</th><th>Activity</th><th>Type</th></tr></thead>
           <tbody>
-          ${j.labels.map(l=>`<tr><td class="text-muted">${l.index}</td><td class="text-muted" style="font-size:.75rem">${l.file}</td><td>${pill(l.activity)}</td></tr>`).join('')}
+          ${j.events.slice(0,80).map((e,i)=>`
+            <tr><td class="text-muted">${i+1}</td><td>${e.start}</td><td>${e.end}</td><td>${e.duration}</td>
+            <td>${pill(e.activity)}</td>
+            <td>${VA_CLS.includes(e.activity) ? '<span class="badge badge-va">VA</span>' : '<span class="badge badge-nva">NVA</span>'}</td></tr>`).join('')}
           </tbody>
         </table></div>
-      </div>`;
-  } catch (e) {
-    res.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
-  }
+      </div>
+    </div>
+    <div class="card-wpm">
+      <div class="card-title"><i class="bi bi-card-image"></i> Per-Frame Predictions</div>
+      <div class="scroll-x" style="max-height:420px;overflow-y:auto"><table class="table table-wpm">
+        <thead><tr><th>#</th><th>File</th><th>Prediction</th></tr></thead>
+        <tbody>
+        ${j.labels.map(l=>`<tr><td class="text-muted">${l.index}</td><td class="text-muted" style="font-size:.75rem">${l.file}</td><td>${pill(l.activity)}</td></tr>`).join('')}
+        </tbody>
+      </table></div>
+    </div>`;
+}
+
+function pollJob(jid) {
+  pollTimer = setInterval(async () => {
+    let j;
+    try {
+      const r = await fetch('/api/jobs/' + encodeURIComponent(jid));
+      j = await wpmJson(r);
+    } catch (e) { clearInterval(pollTimer); showError(e.message); return; }
+    if (!j.ok) { clearInterval(pollTimer); showError(j.error || 'job not found'); return; }
+    if (j.status === 'running') {
+      setProgress(j.message || 'Detecting…', j.progress || 0);
+    } else if (j.status === 'done') {
+      clearInterval(pollTimer);
+      setProgress('Completed', 100);
+      progEl.style.display = 'none';
+      renderResult(j.result);
+    } else if (j.status === 'error') {
+      clearInterval(pollTimer);
+      showError(j.error || 'detection failed');
+    }
+  }, 800);
+}
+
+document.getElementById('cnnForm').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  resEl.innerHTML = '';
+  const fd = new FormData(ev.target);
+  showProgress('Uploading…', 0);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '{{ url_for("ml_cnn_predict") }}');
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable)
+      setProgress(`Uploading ${fmtBytes(e.loaded)} / ${fmtBytes(e.total)}`, e.loaded / e.total * 100);
+  };
+  xhr.upload.onload = () => setProgress('Upload complete — saving frames…', 100);
+  xhr.onload = () => {
+    let j;
+    try { j = JSON.parse(xhr.responseText); }
+    catch (err) { showError('HTTP ' + xhr.status + (xhr.responseText ? ' — ' + xhr.responseText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 180) : '')); return; }
+    if (!j.ok) { showError(j.error || 'upload failed'); return; }
+    setProgress('Detection queued…', 0);
+    pollJob(j.job);
+  };
+  xhr.onerror = () => showError('Network error during upload.');
+  xhr.send(fd);
 });
 </script>
 {% endblock %}

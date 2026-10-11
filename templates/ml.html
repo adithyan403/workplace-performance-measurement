@@ -6,7 +6,7 @@
 {% set rep = report %}
 <div class="kpi">
   <div class="box card-wpm" style="--glow:rgba(34,211,238,.2)">
-    <div class="num" style="color:{{ '#4ade80' if model_ok else '#f87171' }}">{{ "ONLINE" if model_ok else "OFFLINE" }}</div>
+    <div class="num" style="color:{{ '#16a34a' if model_ok else '#dc2626' }}">{{ "ONLINE" if model_ok else "OFFLINE" }}</div>
     <div class="lbl">Model Status</div>
     <div class="mini">{{ "model.joblib loaded" if model_ok else "train model locally, then ship to data/" }}</div>
   </div>
@@ -125,7 +125,7 @@ document.getElementById('predForm').addEventListener('submit', async (ev) => {
   try {
     const fd = new FormData(ev.target);
     const r = await fetch('{{ url_for("ml_predict") }}', { method:'POST', body: fd });
-    const j = await r.json();
+    const j = await wpmJson(r);
     if (!j.ok) { res.innerHTML = `<div class="alert alert-danger">${j.error}</div>`; return; }
     const v = j.va_nva;
     res.innerHTML = `

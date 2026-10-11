@@ -1,8 +1,131 @@
 {% extends "base.html" %}
 {% block title %}Analysis{% endblock %}
-{% block heading %}Motion &amp; Zone Analysis{% endblock %}
+{% block heading %}CNN Prediction Analysis{% endblock %}
+{% block head %}
+<style>.hero-va { color:#16a34a; } .hero-nva { color:#dc2626; }</style>
+{% endblock %}
 
 {% block content %}
+{% if cnn_ctx %}
+{% set C = cnn_ctx %}
+<div class="kpi">
+  <div class="box card-wpm" style="--glow:rgba(168,85,247,.22)">
+    <div class="num" style="color:#c4b5fd">{{ C.analysis.total }}</div>
+    <div class="lbl">Frames Predicted</div>
+    <div class="mini">ResNet-18 · write/crew/check/wait</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(250,204,21,.18)">
+    <div class="num" style="color:#fde047">{{ C.events | length | format_ns }}</div>
+    <div class="lbl">Duty Events</div>
+    <div class="mini">run-length from predictions</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(34,197,94,.18)">
+    <div class="num hero-va">{{ C.summary.va_nva.VA.pct }}%</div>
+    <div class="lbl">Value-Added</div>
+    <div class="mini">{{ C.summary.va_nva.VA.sec | format_ns }} s writing / entry</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(239,68,68,.18)">
+    <div class="num hero-nva">{{ C.summary.va_nva.NVA.pct }}%</div>
+    <div class="lbl">Non-Value-Added</div>
+    <div class="mini">{{ C.summary.va_nva.NVA.sec | format_ns }} s distracted</div>
+  </div>
+</div>
+
+<div class="card-wpm mb-3">
+  <div class="card-title"><i class="bi bi-bar-chart-steps"></i> CNN Prediction Timeline <span class="text-muted" style="font-size:.72rem">per-second activity bands</span></div>
+  {% if C.bands %}
+  <div class="d-flex" style="gap:2px;height:24px;border-radius:8px;overflow:hidden">
+    {% for b in C.bands %}
+    <div title="{{ b.activity }} (sec {{ b.sec }}-{{ b.end }})" style="flex:1;background:{{ b.color }};opacity:.85"></div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="text-muted" style="font-size:.85rem">no timeline data</p>
+  {% endif %}
+  <div class="d-flex flex-wrap gap-3 mt-2">
+    {% for c in C.colors %}
+    <span class="badge-act" style="background:{{ C.colors[c] }}22;color:{{ C.colors[c] }};border:1px solid {{ C.colors[c] }}55">
+      <span class="dot" style="background:{{ C.colors[c] }}"></span>{{ c }}
+    </span>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="grid2">
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-pie-chart"></i> Class Distribution (CNN)</div>
+    <div style="height:280px"><canvas id="cnnDonut"></canvas></div>
+  </div>
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-bezier2"></i> Value vs Non-Value Time (CNN)</div>
+    <div style="height:280px"><canvas id="cnnVA"></canvas></div>
+  </div>
+</div>
+
+{% if C.report and C.report.confusion_matrix %}
+<div class="grid2">
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-grid-3x3-gap"></i> Confusion Matrix <span class="text-muted" style="font-size:.7rem">true ↓ / predicted →</span></div>
+    <div class="scroll-x">
+      <table style="border-collapse:separate;border-spacing:6px">
+        <tr>
+          <td style="min-width:60px"></td>
+          {% for c in C.report.classes %}<td style="text-align:center;font-size:.72rem;color:var(--muted);writing-mode:vertical-rl">{{ c }}</td>{% endfor %}
+        </tr>
+        {% for r in C.report.classes %}
+        {% set ridx = loop.index0 %}
+        <tr>
+          <td style="text-align:right;font-size:.72rem;color:{{ C.colors[r] }}"><b>{{ r }}</b></td>
+          {% for j in range(C.report.classes | length) %}
+            {% set v = C.report.confusion_matrix[ridx][j] %}
+            {% set mx = C.report.confusion_matrix[ridx] | max %}
+            {% set alpha = 0.15 + 0.85 * (v / mx if mx else 0) %}
+            <td style="min-width:44px;height:44px;text-align:center;border-radius:10px;font-weight:700;font-size:.8rem;color:#0b1220;background:rgba(168,85,247,{{ alpha }})">{{ v }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-list-ul"></i> Detected Events <a href="{{ url_for('ml_cnn_report_view') }}" class="float-end btn btn-ghost btn-sm"><i class="bi bi-file-earmark-pdf"></i> Report</a></div>
+    <div class="scroll-x" style="max-height:340px;overflow-y:auto">
+      <table class="table table-wpm">
+        <thead><tr><th>Start</th><th>End</th><th>Sec</th><th>Activity</th><th>Type</th></tr></thead>
+        <tbody>
+        {% for e in C.events %}
+          <tr>
+            <td>{{ e.start }}</td><td>{{ e.end }}</td><td>{{ e.duration }}</td>
+            <td><span class="badge-act" style="background:{{ C.colors[e.activity] }}22;color:{{ C.colors[e.activity] }};border:1px solid {{ C.colors[e.activity] }}55">{{ e.activity }}</span></td>
+            <td>{% if e.va_nva == 'VA' %}<span class="badge badge-va">VA</span>{% else %}<span class="badge badge-nva">NVA</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card-wpm mt-3">
+  <div class="card-title"><i class="bi bi-info-circle"></i> Acknowledgement</div>
+  <p class="text-muted" style="font-size:.82rem">
+    The KPI and timeline charts above are computed <b>directly from CNN predictions</b>
+    ({{ C.analysis.activities | join(', ') }}) on the {{ C.analysis.total | format_ns }} frames of session
+    <code class="kbd">{{ C.analysis.session or 'full-video run' }}</code>. The confusion matrix comes from the
+    hold-out evaluation of <code class="kbd">data/cnn_report.json</code>. Motion/zone metrics from the classic
+    pipeline remain available below for the flipbook / heatmap evidence.
+  </p>
+</div>
+{% else %}
+<div class="alert alert-warning d-flex align-items-center gap-2" style="font-size:.85rem">
+  <i class="bi bi-gpu-card"></i>
+  <span>No CNN prediction analysis found (<code class="kbd">data/cnn_events.json</code> / <code class="kbd">data/cnn_analysis.json</code>).
+    <a href="{{ url_for('ml_cnn_view') }}" style="text-decoration:underline">Run a detection on the CNN page →</a></span>
+</div>
+{% endif %}
+
+<h3 class="mt-4 mb-2" style="font-size:1.05rem"><i class="bi bi-bounding-box"></i> Classic Motion &amp; Zone Analysis</h3>
 <div class="kpi">
   <div class="box card-wpm" style="--glow:rgba(34,211,238,.2)">
     <div class="num" id="kSecs">0</div><div class="lbl">Seconds Shown</div>
@@ -89,19 +212,42 @@ document.getElementById('kPeak').textContent = maxGd.toLocaleString();
 new Chart(document.getElementById('motionLine'), {
   type:'line', data:{ labels: DATA.sec, datasets:[{ data:DATA.gd, borderColor:'#22d3ee', backgroundColor:'rgba(34,211,238,.12)', fill:true, borderWidth:2, pointRadius:0, tension:.15 }] },
   options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false}, tooltip:{mode:'index'} },
-    scales:{ x:{ ticks:{color:'#64748b', maxTicksLimit:12}, grid:{display:false} }, y:{ beginAtZero:true, ticks:{ color:'#94a3b8' }, grid:{ color:'rgba(255,255,255,.06)' } } } }
+    scales:{ x:{ ticks:{color:'#64748b', maxTicksLimit:12}, grid:{display:false} }, y:{ beginAtZero:true, ticks:{ color:'#475569' }, grid:{ color:'rgba(2,6,23,.06)' } } } }
 });
 new Chart(document.getElementById('zoneLine'), {
   type:'line', data:{ labels:DATA.sec, datasets:[
     { label:'Primary (writing)', data:DATA.pz, borderColor:'#34d399', backgroundColor:'rgba(52,211,153,.10)', fill:true, borderWidth:2, pointRadius:0 },
     { label:'Secondary (crew)', data:DATA.sz, borderColor:'#fbbf24', borderWidth:2, pointRadius:0 }] },
-  options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{labels:{color:'#cbd5e1'}} },
-    scales:{ x:{ ticks:{color:'#64748b',maxTicksLimit:12}, grid:{display:false} }, y:{ beginAtZero:true, ticks:{color:'#94a3b8'}, grid:{color:'rgba(255,255,255,.06)'} } } }
+  options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{labels:{color:'#334155'}} },
+    scales:{ x:{ ticks:{color:'#64748b',maxTicksLimit:12}, grid:{display:false} }, y:{ beginAtZero:true, ticks:{color:'#475569'}, grid:{color:'rgba(2,6,23,.06)'} } } }
 });
 new Chart(document.getElementById('histLine'), {
   type:'line', data:{ labels:DATA.sec, datasets:[{ data:DATA.hc, borderColor:'#a78bfa', backgroundColor:'rgba(167,139,250,.12)', fill:true, borderWidth:2, pointRadius:0 }] },
   options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false} },
-    scales:{ x:{ ticks:{color:'#64748b',maxTicksLimit:12}, grid:{display:false} }, y:{ beginAtZero:true, ticks:{color:'#94a3b8'}, grid:{color:'rgba(255,255,255,.06)'} } } }
+    scales:{ x:{ ticks:{color:'#64748b',maxTicksLimit:12}, grid:{display:false} }, y:{ beginAtZero:true, ticks:{color:'#475569'}, grid:{color:'rgba(2,6,23,.06)'} } } }
 });
+
+/* --------------- CNN prediction charts --------------- */
+{% if cnn_ctx %}
+{% set ch = cnn_ctx.chart %}
+{% set vv = cnn_ctx.summary.va_nva %}
+const CNN = { labels: {{ ch.labels | tojson }}, colors: {{ ch.colors | tojson }},
+  sec: {{ ch.sec | tojson }}, pct: {{ ch.pct | tojson }} };
+new Chart(document.getElementById('cnnDonut'), {
+  type:'doughnut',
+  data:{ labels: CNN.labels, datasets:[{ data: CNN.sec, backgroundColor: CNN.colors, borderColor:'#ffffff', borderWidth:2 }] },
+  options:{ responsive:true, maintainAspectRatio:false, cutout:'62%',
+    plugins:{ legend:{ position:'right', labels:{ color:'#334155', boxWidth:12, font:{size:11} } },
+      tooltip:{ callbacks:{ label: c => ` ${c.label}: ${c.parsed}s (${CNN.pct[c.dataIndex]}%)` } } } }
+});
+new Chart(document.getElementById('cnnVA'), {
+  type:'bar',
+  data:{ labels:['Value-Added','Non-Value-Added'],
+    datasets:[{ data:[{{ vv.VA.sec }}, {{ vv.NVA.sec }}], backgroundColor:['#22c55e','#ef4444'], borderRadius:10, barPercentage:0.5 }] },
+  options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false} },
+    scales:{ y:{ beginAtZero:true, ticks:{color:'#475569'}, grid:{color:'rgba(2,6,23,.06)'} },
+             x:{ ticks:{color:'#334155'}, grid:{display:false} } } }
+});
+{% endif %}
 </script>
 {% endblock %}

@@ -11,11 +11,13 @@ Flask application exposing the five WPM modules to a colorful dashboard:
 Deploy target: Render (gunicorn). MongoDB URI read from env MONGO_URI.
 """
 import csv, json, math, os, io, base64, time
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 from flask import (Flask, Response, jsonify, redirect, render_template,
                    request, send_file, url_for)
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 ROOT = Path(__file__).resolve().parent
 
@@ -37,8 +39,37 @@ except Exception:
 # app + config                                                                #
 # --------------------------------------------------------------------------- #
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 256 * 1024 * 1024
+MAX_UPLOAD_MB = int(os.environ.get("WPM_MAX_UPLOAD_MB", "4096"))
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 app.secret_key = os.environ.get("SECRET_KEY", "wpm-secret")
+
+# --------------------------------------------------------------------------- #
+# JSON-friendly error handling for API/upload endpoints                        #
+# --------------------------------------------------------------------------- #
+_JSON_PREFIXES = ("/ml/", "/api/", "/frames/", "/frame/", "/reports/generate")
+
+def _wants_json():
+    return (request.path.startswith(_JSON_PREFIXES)
+            or "application/json" in (request.headers.get("Accept") or "").lower())
+
+@app.errorhandler(RequestEntityTooLarge)
+def _too_large(e):
+    return jsonify({"ok": False, "error":
+                    f"Upload too large (limit {MAX_UPLOAD_MB} MB per request). "
+                    "Upload fewer frames at a time or split the .zip into "
+                    "smaller batches."}), 413
+
+@app.errorhandler(Exception)
+def _unhandled(e):
+    code = e.code if isinstance(e, HTTPException) and e.code else 500
+    desc = e.description if isinstance(e, HTTPException) else str(e)
+    if not isinstance(e, HTTPException):
+        app.logger.exception("unhandled error on %s", request.path)
+    if _wants_json():
+        return jsonify({"ok": False, "error": desc, "code": code}), code
+    if isinstance(e, HTTPException):
+        return e
+    return "<h1>Internal Server Error</h1>", 500
 
 MONGO_URI = os.environ.get("MONGO_URI", "")
 
@@ -79,6 +110,8 @@ video = VideoModule(proc.cfg, ROOT)
 MODEL_PATH = ROOT / proc.cfg["ml"]["model_path"]
 CNN_MODEL_PATH = ROOT / "data" / "cnn_resnet18.pt"
 CNN_REPORT_PATH = ROOT / "data" / "cnn_report.json"
+CNN_ANALYSIS_PATH = ROOT / "data" / "cnn_analysis.json"
+CNN_REPORT_PDF_PATH = ROOT / "outputs" / "WPM_CNN_Analysis_Report.pdf"
 CNN_UPLOAD_DIR = ROOT / "static" / "cnn_uploads"
 REPORT_PATH = ROOT / "outputs" / "WPM_Duty_Report.pdf"
 CLIP_DIR = ROOT / "static" / "clips"
@@ -182,6 +215,41 @@ def prune_jobs(max_age_hours=24):
         except OSError:
             pass
 
+def _job_update(jid, **fields):
+    """Patch fields on an existing job record (used for live progress)."""
+    p = _job_path(jid)
+    with _JOBS_LOCK:
+        try:
+            j = json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+        except Exception:
+            j = None
+        if j is None:
+            return
+        j.update(fields)
+        try:
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(j, default=str), encoding="utf-8")
+            tmp.replace(p)
+        except OSError:
+            pass
+
+def start_progress_job(kind, worker, *args):
+    """Start a background job whose worker(jid, *args) reports live progress
+    via _job_update(). Returns the job id immediately."""
+    jid = f"{kind}-{int(time.time())}-{os.urandom(3).hex()}"
+    _job_save({"id": jid, "kind": kind, "status": "running",
+               "progress": 0, "message": "queued"})
+
+    def run():
+        try:
+            res = worker(jid, *args)
+            _job_update(jid, status="done", progress=100,
+                        message="done", result=res)
+        except Exception as e:
+            _job_update(jid, status="error", error=str(e))
+    _threading.Thread(target=run, daemon=True).start()
+    return jid
+
 def get_mongo():
     if not (_MONGO and MONGO_URI):
         return None
@@ -265,6 +333,109 @@ def read_training_report():
         return None
     return json.loads(p.read_text(encoding="utf-8"))
 
+# ----------------------------------------------------- CNN analysis sources -- #
+CNN_ANALYSIS_SOURCE = "data/cnn_events.json"   # full-video prediction analysis
+
+def load_cnn_analysis():
+    """Latest CNN prediction analysis (per-frame labels + events + VA/NVA mix).
+
+    Sources, in order:
+      1) data/cnn_analysis.json   -> the most recent uploaded-prediction session
+      2) data/cnn_events.json     -> the full-video detection run (committed)
+    Returns a normalized dict (always with events, total, va_nva, activities,
+    session) or None when neither exists.
+    """
+    paths = [CNN_ANALYSIS_PATH, ROOT / CNN_ANALYSIS_SOURCE]
+    for p in paths:
+        if p.exists():
+            try:
+                return _normalize_cnn_analysis(json.loads(p.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+    return None
+
+def _normalize_cnn_analysis(a):
+    """Fill the fields the templates/report rely on, whatever the source shape."""
+    events = a.get("events", []) or []
+    a["events"] = events
+    a.setdefault("activities", list(cnn_module.CLASSES))
+    total = int(a.get("total", 0) or a.get("n_frames", 0)
+                or (max((e.get("end", 0) for e in events), default=-1) + 1))
+    a["total"] = total
+    a["n_frames"] = int(a.get("n_frames", 0) or total)
+    if not a.get("va_nva"):
+        va = sum(e.get("duration", 0) for e in events
+                 if str(e.get("activity", "")).lower() in cnn_module.VA_CLASSES)
+        nva = total - va
+        a["va_nva"] = {"total": total,
+                       "VA": {"sec": va, "pct": round(100*va/total, 2) if total else 0},
+                       "NVA": {"sec": nva, "pct": round(100*nva/total, 2) if total else 0}}
+    a.setdefault("session", "full-video run")
+    a.setdefault("source", "full-video")
+    a.setdefault("generated_at", "—")
+    return a
+
+def cnn_events_rows(analysis):
+    """Build summary_from_logs()-compatible rows from a CNN analysis doc.
+
+    The CNN works with lowercase class ids (write/crew/check/wait); the
+    dashboard maps them back onto the config's canonical ids so existing
+    colors/labels/VA rules keep working.
+    """
+    rows = []
+    for e in analysis.get("events", []):
+        act = (e.get("activity") or "").upper()
+        if not act:
+            continue
+        rows.append({"activity": act,
+                     "va_nva": "VA" if act in {a["id"] for a in proc.cfg["activities"] if a["va"]} else "NVA",
+                     "time_frame": {"duration_s": e.get("duration", 0)}})
+    return rows
+
+def cnn_summary_payload(analysis):
+    """Dashboard summary + chart payload derived from CNN predictions."""
+    s = summary_from_logs(cnn_events_rows(analysis))
+    return s, chart_payload_from_summary(s)
+
+def cnn_timeline_bands(analysis, n=240):
+    """Compact per-band activity band for a color-coded timeline strip.
+
+    Aggregates the per-frame predictions/events into 'n' time buckets, each
+    labelled with its dominant activity — used to draw the CNN prediction
+    timeline on the dashboard / analysis page.
+    """
+    try:
+        total = int(analysis.get("total", 0)) or int(analysis.get("n_frames", 0))
+    except Exception:
+        total = 0
+    events = analysis.get("events", [])
+    if not total and events:
+        total = max(e.get("end", 0) for e in events) + 1
+    if not total:
+        return []
+    # build a per-second activity array from events (sparse)
+    sec_labels = [None] * total
+    for e in events:
+        for s in range(int(e.get("start", 0)), int(e.get("end", 0)) + 1):
+            if 0 <= s < total:
+                sec_labels[s] = (e.get("activity") or "").lower()
+    step = max(1, (total + n - 1) // n)
+    bands = []
+    for s in range(0, total, step):
+        bucket = [x for x in sec_labels[s:s + step] if x]
+        act = Counter(bucket).most_common(1)[0][0] if bucket else "?"
+        bands.append({"activity": act, "sec": s, "end": min(s + step, total),
+                      "color": proc.color(act)})
+    return bands
+
+def save_cnn_analysis(analysis_dict):
+    """Persist a prediction run so the whole site reads the same CNN results."""
+    analysis_dict.setdefault("source", "upload")
+    analysis_dict.setdefault("generated_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+    CNN_ANALYSIS_PATH.write_text(json.dumps(analysis_dict, indent=2, default=str),
+                                 encoding="utf-8")
+    return CNN_ANALYSIS_PATH
+
 # --------------------------------------------------------------- context -- #
 @app.context_processor
 def inject_globals():
@@ -274,6 +445,20 @@ def inject_globals():
 # ------------------------------------------------------------------ views -- #
 @app.route("/")
 def dashboard():
+    cnn_analysis = load_cnn_analysis()
+    if cnn_analysis and cnn_analysis.get("events"):
+        # deep-learning analysis: everything on this page is driven by CNN
+        # predictions (per-frame ResNet-18 labels -> duty events -> VA/NVA)
+        s, chart = cnn_summary_payload(cnn_analysis)
+        return render_template("dashboard.html",
+                               summary=s, chart=chart,
+                               analysis_source="cnn", cnn_analysis=cnn_analysis,
+                               cnn_bands=cnn_timeline_bands(cnn_analysis),
+                               colors={a["id"]: a["color"]
+                                       for a in proc.cfg["activities"]},
+                               activities=proc.cfg["activities"],
+                               db_mode=False)
+    # fallback: classic duty logs (Mongo or shipped sample)
     rows = load_duty_logs(limit=8000)
     if rows is None:
         # fallback: static event log shipped with the app
@@ -283,18 +468,42 @@ def dashboard():
     chart = chart_payload_from_summary(s)
     return render_template("dashboard.html",
                            summary=s, chart=chart,
+                           analysis_source="logs",
                            colors={a["id"]: a["color"] for a in proc.cfg["activities"]},
                            activities=proc.cfg["activities"],
                            db_mode=(rows is not None and _MONGO and MONGO_URI))
 
 @app.route("/analysis")
 def analysis_view():
+    cnn_analysis = load_cnn_analysis()
+    cnn_report = None
+    if CNN_REPORT_PATH.exists():
+        try:
+            cnn_report = json.loads(CNN_REPORT_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            cnn_report = None
+
     metrics_path = ROOT / "data" / "metrics_perSecond.json"
     metrics = json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.exists() else []
     heat = reporting.zone_heatmap(proc.cfg["zones"]["cell_mean"])
+
+    cnn_ctx = None
+    if cnn_analysis and cnn_analysis.get("events"):
+        s, chart = cnn_summary_payload(cnn_analysis)
+        cnn_ctx = {
+            "analysis": cnn_analysis,
+            "summary": s,
+            "chart": chart,
+            "bands": cnn_timeline_bands(cnn_analysis),
+            "report": cnn_report,
+            "events": cnn_analysis.get("events", [])[:200],
+            "colors": {c: proc.color(c) for c in cnn_module.CLASSES},
+        }
     return render_template("analysis.html", metrics=metrics[:600],
                            heatmap=heat, zones=proc.cfg["zones"],
-                           colors={a["id"]: a["color"] for a in proc.cfg["activities"]},
+                           cnn_ctx=cnn_ctx,
+                           colors={a["id"]: a["color"]
+                                   for a in proc.cfg["activities"]},
                            activities=proc.cfg["activities"])
 
 @app.route("/logs")
@@ -352,7 +561,8 @@ def ml_cnn_view():
 
 @app.route("/ml/cnn/predict", methods=["POST"])
 def ml_cnn_predict():
-    """Accept uploaded frames (multiple images or a .zip) and run the CNN."""
+    """Accept uploaded frames (multiple images or a .zip), store them, then
+    run the CNN as a background job so the browser can show live progress."""
     if not CNN_MODEL_PATH.exists():
         return jsonify({"ok": False, "error":
                         "CNN model not found (data/cnn_resnet18.pt). Train locally "
@@ -400,33 +610,104 @@ def ml_cnn_predict():
         return jsonify({"ok": False, "error":
                         "No valid frame images (.jpg/.png) found in upload."}), 400
 
-    try:
-        det = cnn_module.CnnDetector(CNN_MODEL_PATH)
-        preds = det.classify_paths(img_paths)
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"CNN inference failed: {e}"}), 500
+    jid = start_progress_job("cnn_predict", _do_cnn_predict, str(sess_dir))
+    return jsonify({"ok": True, "job": jid, "n_uploaded": n_uploaded,
+                    "session": sess_dir.name})
 
+def _do_cnn_predict(jid, sess_dir):
+    """Background worker: classify every uploaded frame, reporting progress."""
+    img_paths = cnn_module.collect_images(sess_dir)
+    total = len(img_paths)
+    _job_update(jid, message="Loading ResNet-18 model…")
+    det = cnn_module.CnnDetector(CNN_MODEL_PATH)
+
+    def on_progress(done, tot):
+        _job_update(jid, progress=round(100 * done / tot) if tot else 0,
+                    message=f"Classifying frames {done}/{tot}")
+
+    preds = det.classify_paths(img_paths, on_progress=on_progress)
     events = cnn_module.predictions_to_events(preds)
     vanva = cnn_module.find_va_nva(events)
-    from collections import Counter
     dist = dict(Counter(preds))
     labels = [{"file": Path(p).name, "activity": a,
                "va_nva": "VA" if a in cnn_module.VA_CLASSES else "NVA",
                "index": i} for i, (p, a) in enumerate(zip(img_paths, preds))]
 
-    return jsonify({
-        "ok": True,
+    # persist this run as the site-wide CNN analysis source
+    save_cnn_analysis({
+        "session": Path(sess_dir).name,
+        "source": "upload",
         "n_frames": len(preds),
         "activities": cnn_module.CLASSES,
-        "activity_colors": {c: proc.color(c)
-                            for c in cnn_module.CLASSES},
+        "events": events,
+        "total": len(preds),
+        "va_nva": vanva,
+    })
+
+    return {
+        "n_frames": len(preds),
+        "activities": cnn_module.CLASSES,
+        "activity_colors": {c: proc.color(c) for c in cnn_module.CLASSES},
         "va_classes": sorted(cnn_module.VA_CLASSES),
         "distribution": dist,
         "va_nva": vanva,
         "labels": labels[:400],
         "events": events[:120],
-        "session": sess_dir.name,
-    })
+        "session": Path(sess_dir).name,
+    }
+
+@app.route("/ml/cnn/report", methods=["GET"])
+def ml_cnn_report_view():
+    """CNN analysis report: generate + download the latest prediction analysis."""
+    analysis = load_cnn_analysis()
+    cnn_report = None
+    if CNN_REPORT_PATH.exists():
+        try:
+            cnn_report = json.loads(CNN_REPORT_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            cnn_report = None
+    cnn_chart = None
+    if analysis and analysis.get("events"):
+        _, cnn_chart = cnn_summary_payload(analysis)
+    return render_template("cnn_report.html",
+                           cnn_ok=CNN_MODEL_PATH.exists(),
+                           analysis=analysis,
+                           cnn_report=cnn_report,
+                           cnn_chart=cnn_chart,
+                           report_exists=CNN_REPORT_PDF_PATH.exists(),
+                           classes=cnn_module.CLASSES,
+                           classes_colors={c: proc.color(c)
+                                           for c in cnn_module.CLASSES},
+                           va_classes=sorted(cnn_module.VA_CLASSES))
+
+@app.route("/ml/cnn/report/generate", methods=["POST"])
+def ml_cnn_report_generate():
+    """Build the CNN analysis PDF from the latest saved prediction run."""
+    analysis = load_cnn_analysis()
+    if not analysis or not analysis.get("events"):
+        return jsonify({"ok": False, "error":
+                        "No CNN prediction analysis yet. Run a detection first "
+                        "(upload frames on the CNN page)."}), 400
+    try:
+        import importlib
+        cnn_report = None
+        if CNN_REPORT_PATH.exists():
+            cnn_report = json.loads(CNN_REPORT_PATH.read_text(encoding="utf-8"))
+        class_colors = {c: proc.color(c) for c in cnn_module.CLASSES}
+        path = reporting.generate_cnn_report(analysis, CNN_REPORT_PDF_PATH,
+                                             cnn_report=cnn_report,
+                                             class_colors=class_colors)
+        return jsonify({"ok": True, "path": path,
+                        "size": os.path.getsize(path)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"report failed: {e}"}), 500
+
+@app.route("/ml/cnn/report/download")
+def ml_cnn_report_download():
+    if not CNN_REPORT_PDF_PATH.exists():
+        return jsonify({"ok": False, "error": "no report yet"}), 404
+    return send_file(CNN_REPORT_PDF_PATH, as_attachment=True,
+                     download_name="WPM_CNN_Analysis_Report.pdf")
 
 @app.route("/ml/predict", methods=["POST"])
 def ml_predict():

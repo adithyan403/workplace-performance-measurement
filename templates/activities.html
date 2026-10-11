@@ -63,7 +63,7 @@
           <td>{{ r.time_frame.start_ts }}</td>
           <td>{{ r.time_frame.end_ts }}</td>
           <td>{{ r.time_frame.duration_s }}s</td>
-          <td><span class="badge-act" style="background:{{ r.activity_color or colors.get(r.activity,'#94a3b8') }}22;color:{{ r.activity_color or colors.get(r.activity,'#e2e8f0') }};border:1px solid {{ r.activity_color or colors.get(r.activity,'#94a3b8') }}55">{{ r.activity }}</span></td>
+          <td><span class="badge-act" style="background:{{ r.activity_color or colors.get(r.activity,'#94a3b8') }}22;color:{{ r.activity_color or colors.get(r.activity,'#334155') }};border:1px solid {{ r.activity_color or colors.get(r.activity,'#94a3b8') }}55">{{ r.activity }}</span></td>
           <td>{% if r.va_nva=='VA' %}<span class="badge-act badge-va">VA</span>{% else %}<span class="badge-act badge-nva">NVA</span>{% endif %}</td>
           <td class="text-muted" style="font-size:.72rem">{{ r.source or 'WPM' }}</td>
           <td>
@@ -154,7 +154,7 @@ async function loadFrames(s, e) {
   document.getElementById('frameCount').textContent = '';
   try {
     const r = await fetch(`/frames/${s}/${e}`);
-    const j = await r.json();
+    const j = await wpmJson(r);
     if (!j.ok || !j.frames.length) {
       strip.innerHTML = '<span class="text-muted" style="font-size:.8rem">no frames found for this range</span>';
       return;

@@ -19,6 +19,11 @@ Thumbs.db
 # generated clip + frame cache
 static/clips/
 static/b2cache/
+static/cnn_uploads/
+
+# runtime CNN analysis crop + generated report (model + full-video run are shipped)
+data/cnn_analysis.json
+outputs/WPM_CNN_Analysis_Report.pdf
 
 # background job bookkeeping
 .jobs/
