@@ -46,6 +46,9 @@ class ProcessModule:
 
     def color(self, activity):
         a = self.activities.get(activity)
+        if not a:
+            a = next((x for x in self.cfg["activities"]
+                      if x["id"].lower() == str(activity).lower()), None)
         return a["color"] if a else "#94a3b8"
 
     # ------------------------------------------------------------------ #

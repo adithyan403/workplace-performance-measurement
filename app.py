@@ -25,6 +25,7 @@ from modules.analysis_module import AnalysisModule
 from modules.automation_module import AutomationModule
 from modules.reporting_module import ReportingModule
 from modules.b2_module import B2Module
+from modules import cnn_module
 
 try:
     import pymongo
@@ -76,6 +77,9 @@ reporting = ReportingModule(proc.cfg, proc, ROOT)
 video = VideoModule(proc.cfg, ROOT)
 
 MODEL_PATH = ROOT / proc.cfg["ml"]["model_path"]
+CNN_MODEL_PATH = ROOT / "data" / "cnn_resnet18.pt"
+CNN_REPORT_PATH = ROOT / "data" / "cnn_report.json"
+CNN_UPLOAD_DIR = ROOT / "static" / "cnn_uploads"
 REPORT_PATH = ROOT / "outputs" / "WPM_Duty_Report.pdf"
 CLIP_DIR = ROOT / "static" / "clips"
 
@@ -311,6 +315,118 @@ def ml_view():
     return render_template("ml.html", report=report, model_ok=model_ok,
                            classes=proc.cfg["ml"]["classes"],
                            colors={a["id"]: a["color"] for a in proc.cfg["activities"]})
+
+def _cnn_uploaded_count():
+    """Frames inside the most recent upload session (or 0)."""
+    try:
+        if not CNN_UPLOAD_DIR.is_dir():
+            return 0
+        runs = sorted([d for d in CNN_UPLOAD_DIR.iterdir()
+                       if d.is_dir() and d.name.startswith("run_")])
+        if not runs:
+            return 0
+        return len(list(runs[-1].iterdir()))
+    except Exception:
+        return 0
+
+
+@app.route("/ml/cnn")
+def ml_cnn_view():
+    """Deep-learning (ResNet-18) activity detection over uploaded frames."""
+    cnn_report = None
+    if CNN_REPORT_PATH.exists():
+        try:
+            cnn_report = json.loads(
+                CNN_REPORT_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            cnn_report = None
+    return render_template("cnn.html",
+                           cnn_ok=CNN_MODEL_PATH.exists(),
+                           dl_ok=cnn_module.available(),
+                           classes=cnn_module.CLASSES,
+                           classes_colors={c: proc.color(c)
+                                           for c in cnn_module.CLASSES},
+                           va_classes=sorted(cnn_module.VA_CLASSES),
+                           cnn_report=cnn_report,
+                           uploaded=_cnn_uploaded_count())
+
+@app.route("/ml/cnn/predict", methods=["POST"])
+def ml_cnn_predict():
+    """Accept uploaded frames (multiple images or a .zip) and run the CNN."""
+    if not CNN_MODEL_PATH.exists():
+        return jsonify({"ok": False, "error":
+                        "CNN model not found (data/cnn_resnet18.pt). Train locally "
+                        "with scripts/train_cnn_resnet.py and ship it to data/."}), 400
+    if not cnn_module.available():
+        return jsonify({"ok": False, "error":
+                        "PyTorch is not installed on this server. Add torch + "
+                        "torchvision (and Pillow) to requirements."}), 400
+    files = request.files.getlist("frames")
+    if not files or not files[0] or files[0].filename == "":
+        return jsonify({"ok": False, "error": "Select at least one frame image "
+                        "or a .zip before running detection."}), 400
+
+    sess_dir = CNN_UPLOAD_DIR / f"run_{int(time.time())}"
+    sess_dir.mkdir(parents=True, exist_ok=True)
+
+    # keep only the newest 5 sessions to bound disk usage
+    try:
+        runs = sorted([d for d in CNN_UPLOAD_DIR.iterdir()
+                       if d.is_dir() and d.name.startswith("run_")],
+                      key=lambda d: d.name)
+        for old in runs[:-5]:
+            import shutil
+            shutil.rmtree(old, ignore_errors=True)
+    except Exception:
+        pass
+
+    n_uploaded = 0
+    for f in files:
+        name = os.path.basename(f.filename or "")
+        if not name:
+            continue
+        safe = Path(name).name
+        if safe.lower().endswith(".zip"):
+            zpath = sess_dir / safe
+            f.save(str(zpath))
+            n_uploaded += cnn_module.extract_upload(zpath, sess_dir)
+            continue
+        if safe.lower().endswith((".jpg", ".jpeg", ".png")):
+            f.save(str(sess_dir / safe))
+            n_uploaded += 1
+
+    img_paths = cnn_module.collect_images(sess_dir)
+    if not img_paths:
+        return jsonify({"ok": False, "error":
+                        "No valid frame images (.jpg/.png) found in upload."}), 400
+
+    try:
+        det = cnn_module.CnnDetector(CNN_MODEL_PATH)
+        preds = det.classify_paths(img_paths)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"CNN inference failed: {e}"}), 500
+
+    events = cnn_module.predictions_to_events(preds)
+    vanva = cnn_module.find_va_nva(events)
+    from collections import Counter
+    dist = dict(Counter(preds))
+    labels = [{"file": Path(p).name, "activity": a,
+               "va_nva": "VA" if a in cnn_module.VA_CLASSES else "NVA",
+               "index": i} for i, (p, a) in enumerate(zip(img_paths, preds))]
+
+    return jsonify({
+        "ok": True,
+        "n_frames": len(preds),
+        "activities": cnn_module.CLASSES,
+        "activity_colors": {c: proc.color(c)
+                            for c in cnn_module.CLASSES},
+        "va_classes": sorted(cnn_module.VA_CLASSES),
+        "distribution": dist,
+        "va_nva": vanva,
+        "labels": labels[:400],
+        "events": events[:120],
+        "session": sess_dir.name,
+    })
 
 @app.route("/ml/predict", methods=["POST"])
 def ml_predict():

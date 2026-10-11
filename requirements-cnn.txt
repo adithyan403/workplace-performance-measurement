@@ -1,0 +1,5 @@
+# Optional CNN inference stack (used only by the /ml/cnn page).
+# Install with: pip install -r requirements-cnn.txt
+Pillow>=10.0
+torch>=2.2
+torchvision>=0.17

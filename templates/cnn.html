@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}CNN Deep Detection{% endblock %}
+{% block heading %}CNN Deep-Learning Detection{% endblock %}
+
+{% block content %}
+{% set report = cnn_report %}
+<div class="kpi">
+  <div class="box card-wpm" style="--glow:rgba(168,85,247,.22)">
+    <div class="num" style="color:{{ '#4ade80' if cnn_ok else '#f87171' }}">{{ "ONLINE" if cnn_ok else "OFFLINE" }}</div>
+    <div class="lbl">ResNet-18 Model</div>
+    <div class="mini">{{ "cnn_resnet18.pt loaded" if cnn_ok else "train locally, ship to data/" }}</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(250,204,21,.18)">
+    <div class="num">{{ (report.test_accuracy * 100) | round(1) if report else '—' }}%</div>
+    <div class="lbl">Test Accuracy</div>
+    <div class="mini">{{ report.test_frames if report else 0 }} hold-out frames</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(34,197,94,.16)">
+    <div class="num">{{ classes | length }}</div>
+    <div class="lbl">Activity Classes</div>
+    <div class="mini">{{ classes | join(', ') }}</div>
+  </div>
+  <div class="box card-wpm" style="--glow:rgba(34,211,238,.18)">
+    <div class="num">{{ uploaded }}</div>
+    <div class="lbl">Frames Uploaded</div>
+    <div class="mini">newest session</div>
+  </div>
+</div>
+
+{% if report %}
+<div class="grid2">
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-grid-3x3-gap"></i> CNN Confusion Matrix <span class="text-muted" style="font-size:.7rem">true ↓ / predicted →</span></div>
+    <div class="scroll-x">
+      <table style="border-collapse:separate;border-spacing:6px">
+        <tr>
+          <td style="min-width:60px"></td>
+          {% for c in report.classes %}<td style="text-align:center;font-size:.72rem;color:var(--muted);writing-mode:vertical-rl">{{ c }}</td>{% endfor %}
+        </tr>
+        {% for r in report.classes %}
+        {% set ridx = loop.index0 %}
+        <tr>
+          <td style="text-align:right;font-size:.72rem;color:{{ classes_colors[r] }}"><b>{{ r }}</b></td>
+          {% for j in range(report.classes | length) %}
+            {% set v = report.confusion_matrix[ridx][j] %}
+            {% set mx = report.confusion_matrix[ridx] | max %}
+            {% set alpha = 0.15 + 0.85 * (v / mx if mx else 0) %}
+            <td style="min-width:44px;height:44px;text-align:center;border-radius:10px;font-weight:700;font-size:.8rem;color:#0b1220;background:rgba(168,85,247,{{ alpha }})">{{ v }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+  <div class="card-wpm">
+    <div class="card-title"><i class="bi bi-file-earmark-bar-graph"></i> Per-Class Report</div>
+    <div class="scroll-x">
+      <table class="table table-wpm">
+        <thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>Test&nbsp;#</th></tr></thead>
+        <tbody>
+        {% for c in report.classes %}
+          <tr>
+            <td><span class="badge-act" style="background:{{ classes_colors[c] }}22;color:{{ classes_colors[c] }};border:1px solid {{ classes_colors[c] }}55">{{ c }}</span></td>
+            <td>{{ report.per_class[c]['precision'] | round(3) }}</td>
+            <td>{{ report.per_class[c]['recall'] | round(3) }}</td>
+            <td>{{ report.per_class[c]['test_support'] }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card-wpm mt-3">
+  <div class="card-title"><i class="bi bi-cloud-upload"></i> Upload Frames &amp; Auto-Detect</div>
+  <p class="text-muted" style="font-size:.85rem">
+    Upload one or more frames (or a <code class="kbd">.zip</code> of frames). The
+    <b style="color:var(--accent)">ResNet-18</b> deep-learning model labels each frame as
+    {% for c in classes %}<span class="badge-act" style="background:{{ classes_colors[c] }}22;color:{{ classes_colors[c] }};border:1px solid {{ classes_colors[c] }}55">{{ c }}</span>{% endfor %},
+    builds the duty-event timeline and the <b class="text-success">VA</b>/<b class="text-danger">NVA</b> split.
+  </p>
+  <form id="cnnForm" class="row g-3 align-items-end">
+    <div class="col-md-6">
+      <label class="form-label" style="font-size:.78rem;color:var(--muted)">Frames — .jpg / .png files or a .zip</label>
+      <input name="frames" type="file" class="form-control form-control-sm" multiple accept=".jpg,.jpeg,.png,.zip" required>
+    </div>
+    <div class="col-md-6 d-grid">
+      <button class="btn btn-grad" type="submit" {{ 'disabled' if not cnn_ok else '' }}><i class="bi bi-gpu-card"></i> Run Deep Detection</button>
+    </div>
+  </form>
+  <p class="text-muted mt-2" style="font-size:.72rem">
+    {% if not dl_ok %}
+    ⚠ PyTorch is not installed here — drop <code class="kbd">torch</code>, <code class="kbd">torchvision</code> and <code class="kbd">Pillow</code> into requirements to enable inference.
+    {% elif not cnn_ok %}
+    ⚠ Model file missing — run <code class="kbd">scripts/train_cnn_resnet.py</code> locally, then ship <code class="kbd">data/cnn_resnet18.pt</code> here.
+    {% else %}
+    ✓ Inference engine ready (PyTorch + ResNet-18).
+    {% endif %}
+  </p>
+  <div id="cnnResult" class="mt-4"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const COL = {{ classes_colors | tojson }};
+const VA_CLS = {{ va_classes | tojson }};
+function pill(a) {
+  const c = COL[a] || '#94a3b8';
+  return `<span class="badge-act" style="color:${c};border:1px solid ${c}55;background:${c}22">${a}</span>`;
+}
+document.getElementById('cnnForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const res = document.getElementById('cnnResult');
+  res.innerHTML = '<div class="spinner-border spinner-border-sm text-info"></div> running inference over uploaded frames…';
+  try {
+    const fd = new FormData(ev.target);
+    const r = await fetch('{{ url_for("ml_cnn_predict") }}', { method:'POST', body: fd });
+    const j = await r.json();
+    if (!j.ok) { res.innerHTML = `<div class="alert alert-danger">${j.error}</div>`; return; }
+    const v = j.va_nva, dist = j.distribution;
+    const distRows = Object.keys(dist).map(c =>
+      `<tr><td>${pill(c)}</td><td>${dist[c]} s</td><td>${(100*dist[c]/j.n_frames).toFixed(1)}%</td></tr>`).join('');
+    res.innerHTML = `
+      <div class="alert alert-success p-2" style="font-size:.85rem">
+        <b>${j.n_frames}</b> frames predicted → <b>${j.events.length}</b> duty events ·
+        VA <b class="text-success">${v.VA.pct}%</b> (${v.VA.sec}s) · NVA <b class="text-danger">${v.NVA.pct}%</b> (${v.NVA.sec}s)
+      </div>
+      <div class="grid2">
+        <div class="card-wpm">
+          <div class="card-title"><i class="bi bi-bar-chart-fill"></i> Class Distribution</div>
+          <div class="scroll-x"><table class="table table-wpm">
+            <thead><tr><th>Activity</th><th>Seconds</th><th>Share</th></tr></thead>
+            <tbody>${distRows}</tbody>
+          </table></div>
+        </div>
+        <div class="card-wpm">
+          <div class="card-title"><i class="bi bi-bezier2"></i> Event Timeline</div>
+          <div class="scroll-x" style="max-height:320px;overflow-y:auto"><table class="table table-wpm">
+            <thead><tr><th>#</th><th>Start</th><th>End</th><th>Sec</th><th>Activity</th><th>Type</th></tr></thead>
+            <tbody>
+            ${j.events.slice(0,80).map((e,i)=>`
+              <tr><td class="text-muted">${i+1}</td><td>${e.start}</td><td>${e.end}</td><td>${e.duration}</td>
+              <td>${pill(e.activity)}</td>
+              <td>${VA_CLS.includes(e.activity) ? '<span class="badge badge-va">VA</span>' : '<span class="badge badge-nva">NVA</span>'}</td></tr>`).join('')}
+            </tbody>
+          </table></div>
+        </div>
+      </div>
+      <div class="card-wpm">
+        <div class="card-title"><i class="bi bi-card-image"></i> Per-Frame Predictions</div>
+        <div class="scroll-x" style="max-height:420px;overflow-y:auto"><table class="table table-wpm">
+          <thead><tr><th>#</th><th>File</th><th>Prediction</th></tr></thead>
+          <tbody>
+          ${j.labels.map(l=>`<tr><td class="text-muted">${l.index}</td><td class="text-muted" style="font-size:.75rem">${l.file}</td><td>${pill(l.activity)}</td></tr>`).join('')}
+          </tbody>
+        </table></div>
+      </div>`;
+  } catch (e) {
+    res.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
+  }
+});
+</script>
+{% endblock %}
