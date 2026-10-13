@@ -1,0 +1,200 @@
+{
+  "model": "convnextv2_tiny",
+  "arch": "convnextv2_tiny.fcmae_ft_in22k_in1k",
+  "framework": "timm + torch 2.14.1+cu126",
+  "classes": [
+    "write",
+    "crew",
+    "check",
+    "wait"
+  ],
+  "total_frames": 2000,
+  "n_train": 1500,
+  "n_val": 300,
+  "n_test": 200,
+  "train_class_counts": {
+    "write": 644,
+    "crew": 52,
+    "check": 539,
+    "wait": 265
+  },
+  "epochs": 15,
+  "batch": 32,
+  "lr": 0.0003,
+  "params": 27869572,
+  "best_val_acc": 0.9533,
+  "test_acc": 0.93,
+  "per_class": {
+    "write": {
+      "test_support": 84,
+      "precision": 0.9545,
+      "recall": 1.0
+    },
+    "crew": {
+      "test_support": 8,
+      "precision": 0.6667,
+      "recall": 0.25
+    },
+    "check": {
+      "test_support": 69,
+      "precision": 0.8873,
+      "recall": 0.913
+    },
+    "wait": {
+      "test_support": 39,
+      "precision": 0.9737,
+      "recall": 0.9487
+    }
+  },
+  "confusion_matrix": [
+    [
+      84,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      2,
+      6,
+      0
+    ],
+    [
+      4,
+      1,
+      63,
+      1
+    ],
+    [
+      0,
+      0,
+      2,
+      37
+    ]
+  ],
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.5843,
+      "train_acc": 0.5,
+      "val_loss": 1.0376,
+      "val_acc": 0.4767,
+      "seconds": 114.9
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.2059,
+      "train_acc": 0.812,
+      "val_loss": 0.3669,
+      "val_acc": 0.8833,
+      "seconds": 251.2
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.0898,
+      "train_acc": 0.9173,
+      "val_loss": 0.6371,
+      "val_acc": 0.7967,
+      "seconds": 386.1
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.1034,
+      "train_acc": 0.9173,
+      "val_loss": 0.3835,
+      "val_acc": 0.9433,
+      "seconds": 518.8
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.0519,
+      "train_acc": 0.96,
+      "val_loss": 0.5381,
+      "val_acc": 0.94,
+      "seconds": 651.5
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.0253,
+      "train_acc": 0.9773,
+      "val_loss": 0.633,
+      "val_acc": 0.9167,
+      "seconds": 784.7
+    },
+    {
+      "epoch": 7,
+      "train_loss": 0.0408,
+      "train_acc": 0.9613,
+      "val_loss": 0.6247,
+      "val_acc": 0.9067,
+      "seconds": 921.0
+    },
+    {
+      "epoch": 8,
+      "train_loss": 0.0526,
+      "train_acc": 0.9647,
+      "val_loss": 0.3935,
+      "val_acc": 0.94,
+      "seconds": 1057.0
+    },
+    {
+      "epoch": 9,
+      "train_loss": 0.0124,
+      "train_acc": 0.9867,
+      "val_loss": 0.5269,
+      "val_acc": 0.9433,
+      "seconds": 1192.8
+    },
+    {
+      "epoch": 10,
+      "train_loss": 0.0077,
+      "train_acc": 0.9913,
+      "val_loss": 0.5027,
+      "val_acc": 0.94,
+      "seconds": 1327.3
+    },
+    {
+      "epoch": 11,
+      "train_loss": 0.0046,
+      "train_acc": 0.9967,
+      "val_loss": 0.5357,
+      "val_acc": 0.9467,
+      "seconds": 1462.2
+    },
+    {
+      "epoch": 12,
+      "train_loss": 0.0016,
+      "train_acc": 0.9987,
+      "val_loss": 0.6201,
+      "val_acc": 0.9433,
+      "seconds": 1595.5
+    },
+    {
+      "epoch": 13,
+      "train_loss": 0.0069,
+      "train_acc": 0.9947,
+      "val_loss": 0.6178,
+      "val_acc": 0.9433,
+      "seconds": 1729.2
+    },
+    {
+      "epoch": 14,
+      "train_loss": 0.009,
+      "train_acc": 0.9933,
+      "val_loss": 0.6296,
+      "val_acc": 0.9533,
+      "seconds": 1862.2
+    },
+    {
+      "epoch": 15,
+      "train_loss": 0.0054,
+      "train_acc": 0.9947,
+      "val_loss": 0.6945,
+      "val_acc": 0.9467,
+      "seconds": 1997.6
+    }
+  ],
+  "train_seconds": 2010.9,
+  "model_path": "cnn_convnextv2_tiny.pt",
+  "note": "transfer learning from ImageNet-22k FCMAE fine-tuned ConvNeXt V2-Tiny"
+}

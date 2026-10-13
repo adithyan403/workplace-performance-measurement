@@ -1,6 +1,8 @@
 """CNN deep-learning detection module for the WPM webapp.
 
-Loads data/cnn_resnet18.pt (ResNet-18, 4 classes) and provides:
+Loads a 4-class activity checkpoint — ResNet-18 (data/cnn_resnet18.pt) or a
+timm architecture such as ConvNeXt V2-Tiny (data/cnn_convnextv2_tiny.pt); the
+architecture is read from the checkpoint. Provides:
   * classify_paths()  -> per-frame predictions for a list of image files
   * predictions_to_events() -> run-length event log from predictions
   * find_va_nva()     -> VA/NVA summary                  (shared w/ automation)
@@ -45,23 +47,56 @@ MEAN = [0.485, 0.456, 0.406]
 STD = [0.229, 0.224, 0.225]
 
 
-class CnnDetector:
-    """ResNet-18 activity classifier over WPM frame images."""
+def _build_model(arch, num_classes):
+    """Build an untrained classifier for `arch`.
 
-    def __init__(self, model_path, device=None):
+    "resnet*"/None -> torchvision ResNet-18; anything else -> timm (e.g.
+    "convnextv2_tiny.fcmae_ft_in22k_in1k"). Checkpoint weights load separately.
+    """
+    torch, nn, models = _torch, _nn, _models
+    if not arch or str(arch).startswith("resnet"):
+        model = models.resnet18(weights=None)
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+        return model
+    try:
+        import timm
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError(
+            f"model '{arch}' requires the 'timm' package — install it with "
+            f"`pip install timm`") from e
+    return timm.create_model(arch, pretrained=False, num_classes=num_classes)
+
+
+class CnnDetector:
+    """Activity classifier over WPM frame images (ResNet-18 or a timm arch).
+
+    The architecture comes from the checkpoint's "arch" field (falling back to
+    ResNet-18), so both ResNet-18 and ConvNeXt V2-Tiny checkpoints load.
+    """
+
+    def __init__(self, model_path, device=None, arch=None):
         _import()
-        torch, nn, models = _torch, _nn, _models
+        torch = _torch
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
-        model = models.resnet18(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, len(CLASSES))
-        ckpt = torch.load(model_path, map_location=self.device)
+        ckpt = torch.load(model_path, map_location="cpu")
         if "model_state" in ckpt:
-            model.load_state_dict(ckpt["model_state"])
+            state = ckpt["model_state"]
         elif "state_dict" in ckpt:
-            model.load_state_dict(ckpt["state_dict"])
+            state = ckpt["state_dict"]
         else:
-            model.load_state_dict(ckpt)
+            state = ckpt
+        # accept fp16 checkpoints: cast weights back to float32 for the module
+        state = {k: (v.to(torch.float32) if torch.is_tensor(v) and v.is_floating_point()
+                      else v) for k, v in state.items()}
+        arch = arch or (ckpt.get("arch") if isinstance(ckpt, dict) else None)
+        self.arch = arch or "resnet18"
+        self.model_name = ((ckpt.get("model_name") if isinstance(ckpt, dict)
+                            else None) or self.arch)
+        self.classes = list((ckpt.get("classes") if isinstance(ckpt, dict)
+                             else None) or CLASSES)
+        model = _build_model(self.arch, len(self.classes))
+        model.load_state_dict(state)
         model.eval().to(self.device)
         self.model = model
         self.tf = _transforms.Compose([
@@ -86,7 +121,7 @@ class CnnDetector:
                 xb = torch.cat(batch, 0).to(self.device)
                 with torch.no_grad():
                     out = self.model(xb).argmax(1).cpu().numpy().tolist()
-                preds.extend(CLASSES[j] for j in out)
+                preds.extend(self.classes[j] for j in out)
                 batch = []
                 if on_progress:
                     on_progress(len(preds), total)

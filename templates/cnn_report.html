@@ -18,7 +18,7 @@
   <div class="box card-wpm" style="--glow:rgba(168,85,247,.22)">
     <div class="num" style="color:#c4b5fd">{{ analysis.total }}</div>
     <div class="lbl">Frames Predicted</div>
-    <div class="mini">{{ analysis.session or 'full-video run' }}</div>
+    <div class="mini">{{ analysis.get('model_label', model_label) }} · {{ analysis.session or 'full-video run' }}</div>
   </div>
   <div class="box card-wpm" style="--glow:rgba(250,204,21,.18)">
     <div class="num" style="color:#fde047">{{ analysis.events | length }}</div>
@@ -68,7 +68,7 @@
 
 {% if cnn_report and cnn_report.confusion_matrix %}
 <div class="card-wpm">
-  <div class="card-title"><i class="bi bi-grid-3x3-gap"></i> Model Performance <span class="text-muted" style="font-size:.7rem">test accuracy {{ (cnn_report.test_accuracy * 100) | round(1) }}% · {{ cnn_report.test_frames }} hold-out frames</span></div>
+  <div class="card-title"><i class="bi bi-grid-3x3-gap"></i> Model Performance <span class="text-muted" style="font-size:.7rem">{{ analysis.get('model_label', model_label) }} · test accuracy {{ (cnn_report.test_accuracy * 100) | round(1) }}% · {{ cnn_report.test_frames }} hold-out frames</span></div>
   <div class="scroll-x">
     <table class="table table-wpm">
       <thead><tr><th>Class</th><th>Test #</th><th>Precision</th><th>Recall</th></tr></thead>

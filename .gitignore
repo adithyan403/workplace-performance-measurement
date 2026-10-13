@@ -13,6 +13,8 @@ data/X_features.npz
 *.log
 data/_flask*.log
 data/_t.py
+tmp/
+share/
 .ds_store
 Thumbs.db
 

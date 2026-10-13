@@ -16,3 +16,8 @@ b2sdk>=2.0
 Pillow>=10.0
 torch>=2.2
 torchvision>=0.17
+# timm + deps: needed for the ConvNeXt V2-Tiny model (ResNet-18 stays torchvision)
+timm>=0.9
+huggingface_hub>=0.20
+safetensors>=0.4
+PyYAML>=6.0

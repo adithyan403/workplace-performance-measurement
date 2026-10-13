@@ -15,8 +15,8 @@
 <div class="kpi">
   <div class="box card-wpm" style="--glow:rgba(168,85,247,.22)">
     <div class="num" style="color:{{ '#16a34a' if cnn_ok else '#dc2626' }}">{{ "ONLINE" if cnn_ok else "OFFLINE" }}</div>
-    <div class="lbl">ResNet-18 Model</div>
-    <div class="mini">{{ "cnn_resnet18.pt loaded" if cnn_ok else "train locally, ship to data/" }}</div>
+    <div class="lbl">{{ model_label }} Model</div>
+    <div class="mini">{{ "checkpoint loaded" if cnn_ok else "train locally, ship to data/" }}</div>
   </div>
   <div class="box card-wpm" style="--glow:rgba(250,204,21,.18)">
     <div class="num">{{ (report.test_accuracy * 100) | round(1) if report else '—' }}%</div>
@@ -85,16 +85,24 @@
   <div class="card-title"><i class="bi bi-cloud-upload"></i> Upload Frames &amp; Auto-Detect</div>
   <p class="text-muted" style="font-size:.85rem">
     Upload one or more frames (or a <code class="kbd">.zip</code> of frames). The
-    <b style="color:var(--accent)">ResNet-18</b> deep-learning model labels each frame as
+    <b style="color:var(--accent)">{{ model_label }}</b> deep-learning model labels each frame as
     {% for c in classes %}<span class="badge-act" style="background:{{ classes_colors[c] }}22;color:{{ classes_colors[c] }};border:1px solid {{ classes_colors[c] }}55">{{ c }}</span>{% endfor %},
     builds the duty-event timeline and the <b class="text-success">VA</b>/<b class="text-danger">NVA</b> split.
   </p>
   <form id="cnnForm" class="row g-3 align-items-end">
-    <div class="col-md-6">
+    <div class="col-md-4">
+      <label class="form-label" style="font-size:.78rem;color:var(--muted)">Model</label>
+      <select name="model" class="form-select form-select-sm" onchange="location.href='{{ url_for('ml_cnn_view') }}?model='+encodeURIComponent(this.value)">
+        {% for m in models %}
+        <option value="{{ m.key }}" {{ 'selected' if m.key == selected_model else '' }} {{ 'disabled' if not m.available else '' }}>{{ m.label }}{{ '' if m.available else ' — not available' }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-5">
       <label class="form-label" style="font-size:.78rem;color:var(--muted)">Frames — .jpg / .png files or a .zip</label>
       <input name="frames" type="file" class="form-control form-control-sm" multiple accept=".jpg,.jpeg,.png,.zip" required>
     </div>
-    <div class="col-md-6 d-grid">
+    <div class="col-md-3 d-grid">
       <button class="btn btn-grad" type="submit" {{ 'disabled' if not cnn_ok else '' }}><i class="bi bi-gpu-card"></i> Run Deep Detection</button>
     </div>
   </form>
@@ -102,9 +110,9 @@
     {% if not dl_ok %}
     ⚠ PyTorch is not installed here — drop <code class="kbd">torch</code>, <code class="kbd">torchvision</code> and <code class="kbd">Pillow</code> into requirements to enable inference.
     {% elif not cnn_ok %}
-    ⚠ Model file missing — run <code class="kbd">scripts/train_cnn_resnet.py</code> locally, then ship <code class="kbd">data/cnn_resnet18.pt</code> here.
+    ⚠ <b>{{ model_label }}</b> checkpoint missing — train it locally, then ship it to <code class="kbd">data/</code>.
     {% else %}
-    ✓ Inference engine ready (PyTorch + ResNet-18).
+    ✓ Inference engine ready (PyTorch · {{ model_label }}).
     {% endif %}
   </p>
   <div id="cnnProgress" class="mt-4" style="display:none"></div>

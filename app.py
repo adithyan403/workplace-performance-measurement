@@ -10,7 +10,7 @@ Flask application exposing the five WPM modules to a colorful dashboard:
 
 Deploy target: Render (gunicorn). MongoDB URI read from env MONGO_URI.
 """
-import csv, json, math, os, io, base64, time
+import csv, json, math, os, io, base64, time, tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -20,6 +20,19 @@ from flask import (Flask, Response, jsonify, redirect, render_template,
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 ROOT = Path(__file__).resolve().parent
+
+# Keep large upload temp files off the system drive (usually C:): Werkzeug
+# spills multipart parts >500 KB to a temp file, so point the process temp dir
+# at a folder next to the app (same drive as the project).
+_TMP_DIR = ROOT / "tmp"
+try:
+    _TMP_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(_TMP_DIR)
+    os.environ["TEMP"] = str(_TMP_DIR)
+    os.environ["TMP"] = str(_TMP_DIR)
+    tempfile.tempdir = str(_TMP_DIR)
+except OSError:
+    pass
 
 from modules.process_module import ProcessModule
 from modules.video_module import VideoModule
@@ -39,8 +52,11 @@ except Exception:
 # app + config                                                                #
 # --------------------------------------------------------------------------- #
 app = Flask(__name__)
-MAX_UPLOAD_MB = int(os.environ.get("WPM_MAX_UPLOAD_MB", "4096"))
-app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+# 0 (or unset) => no upload size limit. Set WPM_MAX_UPLOAD_MB to a positive
+# number of megabytes to enforce a cap instead.
+MAX_UPLOAD_MB = int(os.environ.get("WPM_MAX_UPLOAD_MB", "0"))
+app.config["MAX_CONTENT_LENGTH"] = (MAX_UPLOAD_MB * 1024 * 1024
+                                    if MAX_UPLOAD_MB > 0 else None)
 app.secret_key = os.environ.get("SECRET_KEY", "wpm-secret")
 
 # --------------------------------------------------------------------------- #
@@ -54,8 +70,9 @@ def _wants_json():
 
 @app.errorhandler(RequestEntityTooLarge)
 def _too_large(e):
+    limit = f"{MAX_UPLOAD_MB} MB" if MAX_UPLOAD_MB > 0 else "configured"
     return jsonify({"ok": False, "error":
-                    f"Upload too large (limit {MAX_UPLOAD_MB} MB per request). "
+                    f"Upload too large (server limit {limit} per request). "
                     "Upload fewer frames at a time or split the .zip into "
                     "smaller batches."}), 413
 
@@ -108,11 +125,27 @@ reporting = ReportingModule(proc.cfg, proc, ROOT)
 video = VideoModule(proc.cfg, ROOT)
 
 MODEL_PATH = ROOT / proc.cfg["ml"]["model_path"]
-CNN_MODEL_PATH = ROOT / "data" / "cnn_resnet18.pt"
-CNN_REPORT_PATH = ROOT / "data" / "cnn_report.json"
 CNN_ANALYSIS_PATH = ROOT / "data" / "cnn_analysis.json"
-CNN_REPORT_PDF_PATH = ROOT / "outputs" / "WPM_CNN_Analysis_Report.pdf"
 CNN_UPLOAD_DIR = ROOT / "static" / "cnn_uploads"
+CNN_REPORT_PDF_PATH = ROOT / "outputs" / "WPM_CNN_Analysis_Report.pdf"
+
+# Selectable CNN activity-detection models. Each checkpoint stores its "arch"
+# (and "model_name"), so CnnDetector loads the right network automatically.
+CNN_MODELS = {
+    "resnet18": {
+        "label": "ResNet-18",
+        "path": ROOT / "data" / "cnn_resnet18.pt",
+        "report": ROOT / "data" / "cnn_report.json",
+    },
+    "convnextv2_tiny": {
+        "label": "ConvNeXt V2-Tiny",
+        "path": ROOT / "data" / "cnn_convnextv2_tiny.pt",
+        "report": ROOT / "data" / "cnn_convnextv2_report.json",
+    },
+}
+CNN_DEFAULT_MODEL = "resnet18"
+CNN_MODEL_PATH = CNN_MODELS[CNN_DEFAULT_MODEL]["path"]
+CNN_REPORT_PATH = CNN_MODELS[CNN_DEFAULT_MODEL]["report"]
 REPORT_PATH = ROOT / "outputs" / "WPM_Duty_Report.pdf"
 CLIP_DIR = ROOT / "static" / "clips"
 
@@ -436,6 +469,38 @@ def save_cnn_analysis(analysis_dict):
                                  encoding="utf-8")
     return CNN_ANALYSIS_PATH
 
+def cnn_model_info(key):
+    """Registry entry for a CNN model key (falls back to the default model)."""
+    return CNN_MODELS.get(key) or CNN_MODELS[CNN_DEFAULT_MODEL]
+
+def cnn_models_list():
+    """[{key,label,available,has_report}] used by the model-picker UI."""
+    return [{"key": k, "label": m["label"], "available": m["path"].exists(),
+             "has_report": m["report"].exists()}
+            for k, m in CNN_MODELS.items()]
+
+def _load_json(path):
+    """Read a JSON file, returning None when missing/invalid."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    except Exception:
+        return None
+
+def cnn_report_for(key):
+    """Training report for a model key, field names normalised for the UI.
+
+    The ResNet-18 trainer writes test_acc/n_test; the ConvNeXt trainer writes
+    test_accuracy/test_frames — normalise both to the latter.
+    """
+    d = _load_json(cnn_model_info(key)["report"])
+    if isinstance(d, dict):
+        if "test_accuracy" not in d and "test_acc" in d:
+            d["test_accuracy"] = d["test_acc"]
+        if "test_frames" not in d and "n_test" in d:
+            d["test_frames"] = d["n_test"]
+        d.setdefault("classes", list(cnn_module.CLASSES))
+    return d
+
 # --------------------------------------------------------------- context -- #
 @app.context_processor
 def inject_globals():
@@ -476,12 +541,7 @@ def dashboard():
 @app.route("/analysis")
 def analysis_view():
     cnn_analysis = load_cnn_analysis()
-    cnn_report = None
-    if CNN_REPORT_PATH.exists():
-        try:
-            cnn_report = json.loads(CNN_REPORT_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            cnn_report = None
+    cnn_report = cnn_report_for((cnn_analysis or {}).get("model"))
 
     metrics_path = ROOT / "data" / "metrics_perSecond.json"
     metrics = json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.exists() else []
@@ -541,32 +601,37 @@ def _cnn_uploaded_count():
 
 @app.route("/ml/cnn")
 def ml_cnn_view():
-    """Deep-learning (ResNet-18) activity detection over uploaded frames."""
-    cnn_report = None
-    if CNN_REPORT_PATH.exists():
-        try:
-            cnn_report = json.loads(
-                CNN_REPORT_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            cnn_report = None
+    """Deep-learning activity detection over uploaded frames (model picker)."""
+    key = request.args.get("model", CNN_DEFAULT_MODEL)
+    info = cnn_model_info(key)
     return render_template("cnn.html",
-                           cnn_ok=CNN_MODEL_PATH.exists(),
+                           cnn_ok=info["path"].exists(),
                            dl_ok=cnn_module.available(),
+                           models=cnn_models_list(),
+                           selected_model=key if key in CNN_MODELS
+                           else CNN_DEFAULT_MODEL,
+                           model_label=info["label"],
                            classes=cnn_module.CLASSES,
                            classes_colors={c: proc.color(c)
                                            for c in cnn_module.CLASSES},
                            va_classes=sorted(cnn_module.VA_CLASSES),
-                           cnn_report=cnn_report,
+                           cnn_report=cnn_report_for(key),
                            uploaded=_cnn_uploaded_count())
 
 @app.route("/ml/cnn/predict", methods=["POST"])
 def ml_cnn_predict():
     """Accept uploaded frames (multiple images or a .zip), store them, then
     run the CNN as a background job so the browser can show live progress."""
-    if not CNN_MODEL_PATH.exists():
+    model_key = request.form.get("model", CNN_DEFAULT_MODEL)
+    if model_key not in CNN_MODELS:
         return jsonify({"ok": False, "error":
-                        "CNN model not found (data/cnn_resnet18.pt). Train locally "
-                        "with scripts/train_cnn_resnet.py and ship it to data/."}), 400
+                        f"Unknown model '{model_key}'."}), 400
+    info = CNN_MODELS[model_key]
+    if not info["path"].exists():
+        return jsonify({"ok": False, "error":
+                        f"Model '{info['label']}' not found "
+                        f"({info['path'].name}). Train it locally and ship the "
+                        "checkpoint to data/."}), 400
     if not cnn_module.available():
         return jsonify({"ok": False, "error":
                         "PyTorch is not installed on this server. Add torch + "
@@ -610,16 +675,19 @@ def ml_cnn_predict():
         return jsonify({"ok": False, "error":
                         "No valid frame images (.jpg/.png) found in upload."}), 400
 
-    jid = start_progress_job("cnn_predict", _do_cnn_predict, str(sess_dir))
+    jid = start_progress_job("cnn_predict", _do_cnn_predict, str(sess_dir),
+                             model_key)
     return jsonify({"ok": True, "job": jid, "n_uploaded": n_uploaded,
-                    "session": sess_dir.name})
+                    "session": sess_dir.name, "model": model_key,
+                    "model_label": info["label"]})
 
-def _do_cnn_predict(jid, sess_dir):
+def _do_cnn_predict(jid, sess_dir, model_key=CNN_DEFAULT_MODEL):
     """Background worker: classify every uploaded frame, reporting progress."""
+    info = cnn_model_info(model_key)
     img_paths = cnn_module.collect_images(sess_dir)
     total = len(img_paths)
-    _job_update(jid, message="Loading ResNet-18 model…")
-    det = cnn_module.CnnDetector(CNN_MODEL_PATH)
+    _job_update(jid, message=f"Loading {info['label']} model…")
+    det = cnn_module.CnnDetector(info["path"])
 
     def on_progress(done, tot):
         _job_update(jid, progress=round(100 * done / tot) if tot else 0,
@@ -637,6 +705,8 @@ def _do_cnn_predict(jid, sess_dir):
     save_cnn_analysis({
         "session": Path(sess_dir).name,
         "source": "upload",
+        "model": model_key,
+        "model_label": info["label"],
         "n_frames": len(preds),
         "activities": cnn_module.CLASSES,
         "events": events,
@@ -645,6 +715,8 @@ def _do_cnn_predict(jid, sess_dir):
     })
 
     return {
+        "model": model_key,
+        "model_label": info["label"],
         "n_frames": len(preds),
         "activities": cnn_module.CLASSES,
         "activity_colors": {c: proc.color(c) for c in cnn_module.CLASSES},
@@ -660,18 +732,15 @@ def _do_cnn_predict(jid, sess_dir):
 def ml_cnn_report_view():
     """CNN analysis report: generate + download the latest prediction analysis."""
     analysis = load_cnn_analysis()
-    cnn_report = None
-    if CNN_REPORT_PATH.exists():
-        try:
-            cnn_report = json.loads(CNN_REPORT_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            cnn_report = None
+    info = cnn_model_info((analysis or {}).get("model"))
+    cnn_report = cnn_report_for((analysis or {}).get("model"))
     cnn_chart = None
     if analysis and analysis.get("events"):
         _, cnn_chart = cnn_summary_payload(analysis)
     return render_template("cnn_report.html",
-                           cnn_ok=CNN_MODEL_PATH.exists(),
+                           cnn_ok=info["path"].exists(),
                            analysis=analysis,
+                           model_label=info["label"],
                            cnn_report=cnn_report,
                            cnn_chart=cnn_chart,
                            report_exists=CNN_REPORT_PDF_PATH.exists(),
@@ -690,9 +759,7 @@ def ml_cnn_report_generate():
                         "(upload frames on the CNN page)."}), 400
     try:
         import importlib
-        cnn_report = None
-        if CNN_REPORT_PATH.exists():
-            cnn_report = json.loads(CNN_REPORT_PATH.read_text(encoding="utf-8"))
+        cnn_report = cnn_report_for(analysis.get("model"))
         class_colors = {c: proc.color(c) for c in cnn_module.CLASSES}
         path = reporting.generate_cnn_report(analysis, CNN_REPORT_PDF_PATH,
                                              cnn_report=cnn_report,

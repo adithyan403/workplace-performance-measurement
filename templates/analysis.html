@@ -12,7 +12,7 @@
   <div class="box card-wpm" style="--glow:rgba(168,85,247,.22)">
     <div class="num" style="color:#c4b5fd">{{ C.analysis.total }}</div>
     <div class="lbl">Frames Predicted</div>
-    <div class="mini">ResNet-18 · write/crew/check/wait</div>
+    <div class="mini">{{ C.analysis.get('model_label', C.analysis.get('model', 'CNN')) }} · write/crew/check/wait</div>
   </div>
   <div class="box card-wpm" style="--glow:rgba(250,204,21,.18)">
     <div class="num" style="color:#fde047">{{ C.events | length | format_ns }}</div>
